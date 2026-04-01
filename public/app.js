@@ -498,7 +498,7 @@
             </div>
           </div>
           <div class="topbar-right">
-            <button type="button" class="text-button theme-toggle">${document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"}</button>
+            <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
           </div>
         </header>
         <main class="preview-stage public" id="previewStage">
