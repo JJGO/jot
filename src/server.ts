@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 
 import express, { type NextFunction, type Request, type Response } from "express";
+import { WebSocketServer, type WebSocket } from "ws";
 import hljs from "highlight.js";
 import { marked, type Tokens } from "marked";
 import sanitizeHtml from "sanitize-html";
@@ -343,6 +345,32 @@ app.get("/api/notes/:id", requireOwnerApi, (req, res) => {
     return;
   }
 
+  const offset = req.query.offset ? Number(req.query.offset) : null;
+  const limit = req.query.limit ? Number(req.query.limit) : null;
+
+  if (offset !== null || limit !== null) {
+    const lines = note.markdown.split("\n");
+    const start = Math.max(0, (offset || 1) - 1);
+    const end = limit ? Math.min(lines.length, start + limit) : lines.length;
+    const slice = lines.slice(start, end);
+    const totalLines = lines.length;
+    const remaining = totalLines - end;
+
+    res.json({
+      ok: true,
+      note: {
+        id: note.id,
+        title: note.title,
+        totalLines,
+        offset: start + 1,
+        limit: slice.length,
+        remaining,
+        content: slice.map((line, i) => `${start + i + 1}: ${line}`).join("\n"),
+      },
+    });
+    return;
+  }
+
   res.json({ ok: true, ...serializeNoteForClient(note, req) });
 });
 
@@ -610,7 +638,45 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ ok: false, error: "Internal server error." });
 });
 
-app.listen(port, () => {
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+type WatchEntry = { ws: WebSocket; noteId: string; shareId: string };
+const watchers: WatchEntry[] = [];
+
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url || "/", `http://localhost:${port}`);
+  const noteId = url.searchParams.get("noteId") || "";
+  const shareId = url.searchParams.get("shareId") || "";
+
+  if (!noteId && !shareId) {
+    ws.close();
+    return;
+  }
+
+  const entry: WatchEntry = { ws, noteId, shareId };
+  watchers.push(entry);
+
+  ws.on("close", () => {
+    const index = watchers.indexOf(entry);
+    if (index !== -1) {
+      watchers.splice(index, 1);
+    }
+  });
+});
+
+function broadcastNoteUpdate(note: NoteRecord) {
+  const message = JSON.stringify({ type: "updated", noteId: note.id, shareId: note.shareId, updatedAt: note.updatedAt });
+  for (const entry of watchers) {
+    if (entry.noteId === note.id || entry.shareId === note.shareId) {
+      if (entry.ws.readyState === 1) {
+        entry.ws.send(message);
+      }
+    }
+  }
+}
+
+server.listen(port, () => {
   console.log(`jot listening on http://localhost:${port}`);
   console.log(`data: ${path.resolve(dataDir)}`);
 });
@@ -706,6 +772,7 @@ function persistNote(note: NoteRecord) {
 
   fs.writeFileSync(noteMarkdownPath(note.id), note.markdown, "utf8");
   writeJson(noteMetaPath(note.id), meta);
+  broadcastNoteUpdate(note);
 }
 
 function searchNotes(query: string) {

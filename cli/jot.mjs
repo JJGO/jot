@@ -147,27 +147,48 @@ switch (subCommand) {
   case "read": {
     const noteId = args[2];
     if (!noteId) {
-      console.error("Usage: jot <instance> read <id>");
+      console.error("Usage: jot <instance> read <id> [--offset=N] [--limit=M]");
       process.exit(1);
     }
-    const payload = await request(instance, "GET", `/api/notes/${noteId}`);
-    const note = payload.note;
-    console.log(`# ${note.title}`);
-    console.log(`# id: ${note.id}`);
-    console.log(`# updated: ${note.updatedAt}`);
-    console.log(`# share: ${note.shareUrl}`);
-    console.log();
-    console.log(note.markdown);
 
-    if (payload.threads && payload.threads.length > 0) {
+    const offsetArg = args.find((a) => a.startsWith("--offset="));
+    const limitArg = args.find((a) => a.startsWith("--limit="));
+    const offset = offsetArg ? offsetArg.split("=")[1] : null;
+    const limit = limitArg ? limitArg.split("=")[1] : null;
+
+    let endpoint = `/api/notes/${noteId}`;
+    const params = [];
+    if (offset) params.push(`offset=${offset}`);
+    if (limit) params.push(`limit=${limit}`);
+    if (params.length) endpoint += `?${params.join("&")}`;
+
+    const payload = await request(instance, "GET", endpoint);
+    const note = payload.note;
+
+    if (note.content !== undefined) {
+      console.log(`# ${note.title}`);
+      console.log(`# id: ${note.id}`);
+      console.log(`# lines: ${note.offset}-${note.offset + note.limit - 1} of ${note.totalLines}${note.remaining > 0 ? ` (${note.remaining} more)` : ""}`);
       console.log();
-      console.log("--- Comments ---");
-      for (const thread of payload.threads) {
-        const anchor = thread.anchor?.quote ? `"${thread.anchor.quote.slice(0, 60)}"` : "(no anchor)";
+      console.log(note.content);
+    } else {
+      console.log(`# ${note.title}`);
+      console.log(`# id: ${note.id}`);
+      console.log(`# updated: ${note.updatedAt}`);
+      console.log(`# share: ${note.shareUrl}`);
+      console.log();
+      console.log(note.markdown);
+
+      if (payload.threads && payload.threads.length > 0) {
         console.log();
-        console.log(`Thread ${thread.id} on ${anchor}${thread.resolved ? " [resolved]" : ""}`);
-        for (const msg of thread.messages) {
-          console.log(`  ${msg.authorName} (${msg.updatedAt}): ${msg.body}`);
+        console.log("--- Comments ---");
+        for (const thread of payload.threads) {
+          const anchor = thread.anchor?.quote ? `"${thread.anchor.quote.slice(0, 60)}"` : "(no anchor)";
+          console.log();
+          console.log(`Thread ${thread.id} on ${anchor}${thread.resolved ? " [resolved]" : ""}`);
+          for (const msg of thread.messages) {
+            console.log(`  ${msg.authorName} (${msg.updatedAt}): ${msg.body}`);
+          }
         }
       }
     }

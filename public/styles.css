@@ -161,6 +161,11 @@ input:focus, textarea:focus { border-color: var(--muted); }
   color: var(--text); font-weight: 600; font-size: 1.1rem;
   width: min(40vw, 480px); min-width: 0;
 }
+
+#notesButton.icon-button {
+  font-size: 1.5rem; font-weight: 300; min-width: 32px; min-height: 32px;
+  padding: 0; line-height: 1;
+}
 .title-input:focus { border: 0; }
 .topbar-title { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.01em; }
 
@@ -186,11 +191,16 @@ input:focus, textarea:focus { border-color: var(--muted); }
 .api-keys-section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line-soft); }
 .api-keys-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
 .api-keys-title { margin: 0; font-size: 1rem; font-weight: 600; color: var(--muted); }
-.api-key-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--line-soft); }
+.api-key-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--line-soft); gap: 0.75rem; }
+.api-key-row .icon-action { width: 32px; height: 32px; min-width: 32px; min-height: 32px; }
+.api-key-row .icon-action svg { width: 16px; height: 16px; }
 .api-key-info { display: flex; align-items: center; gap: 0.75rem; }
 .api-key-label { font-weight: 600; }
 .api-key-meta { color: var(--muted-2); font-size: 0.85rem; }
 .api-keys-empty { color: var(--muted-2); font-size: 0.9rem; }
+.api-key-secret { display: flex; align-items: center; gap: 0.35rem; margin-left: auto; }
+.api-key-secret code { font-size: 0.82rem; color: var(--muted); word-break: break-all; }
+.icon-action.copy-success { color: var(--green); }
 
 .workspace {
   display: grid; grid-template-columns: 1fr 1fr;
@@ -226,7 +236,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
 
 .preview-scroll { overflow-y: auto; overflow-x: hidden; height: calc(100vh - var(--toolbar-height)); }
 .preview-canvas { position: relative; min-height: 100%; }
-.preview-content { max-width: 880px; min-height: 100%; margin: 0 auto; padding: 2rem 1.75rem 4rem 2.5rem; }
+.preview-content { max-width: 880px; min-height: 100%; margin: 0 auto; padding: 2rem 1.75rem 8rem 2.5rem; }
 .preview-stage.public .preview-content { max-width: 980px; }
 
 .markdown-body { color: var(--text); line-height: 1.6; overflow-wrap: break-word; word-wrap: break-word; word-break: break-word; }
@@ -386,14 +396,8 @@ input:focus, textarea:focus { border-color: var(--muted); }
   .preview-stage.public .preview-canvas { padding-right: calc(var(--thread-width) + 20px); }
 }
 
-/* --- Preview FAB and close button (editor mobile only) --- */
-.preview-fab {
-  display: none; position: fixed; bottom: 1.25rem; left: 1.25rem; z-index: 20;
-  padding: 0.5rem 1rem; border-radius: 999px; font-size: 0.88rem; font-weight: 600;
-  border: 1px solid var(--line); background: var(--panel); color: var(--text);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-}
-.preview-fab:hover { background: var(--hover-bg); }
+/* --- Preview button (editor narrow only, in topbar) --- */
+#previewFab { display: none; }
 
 .preview-close-button {
   display: none; position: sticky; top: 0; right: 0; z-index: 12;
@@ -421,7 +425,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
     transform: translateX(0);
   }
   .workspace .preview-stage .preview-close-button { display: flex; }
-  .preview-fab { display: flex; }
+  #previewFab { display: inline-block; }
 
   /* Editor takes full height */
   .editor-textarea { min-height: calc(100vh - var(--toolbar-height)); }
@@ -437,5 +441,4 @@ input:focus, textarea:focus { border-color: var(--muted); }
   /* Public page doesn't need the fab/close, preview is always visible */
   .preview-stage.public { position: static; transform: none; min-height: auto; height: auto; }
   .preview-stage.public .preview-close-button { display: none; }
-  .preview-stage.public ~ .preview-fab { display: none !important; }
 }

@@ -114,12 +114,20 @@
         return;
       }
       const result = await api("/api/keys", { method: "POST", body: { label } });
-      await navigator.clipboard.writeText(result.key);
-      alert(`API key copied to clipboard.\n\nKey: ${result.key}\n\nThis is shown only once.`);
-      loadApiKeys();
+      await loadApiKeys();
+      showNewKey(result.id, result.key);
     });
 
     apiKeysList.addEventListener("click", async (event) => {
+      const copyBtn = event.target.closest("[data-copy-key]");
+      if (copyBtn) {
+        try {
+          await navigator.clipboard.writeText(copyBtn.dataset.copyKey);
+          copyBtn.classList.add("copy-success");
+          setTimeout(() => copyBtn.classList.remove("copy-success"), 1200);
+        } catch {}
+        return;
+      }
       const deleteBtn = event.target.closest("[data-delete-key]");
       if (!deleteBtn) {
         return;
@@ -139,24 +147,38 @@
       const response = await api("/api/keys");
       apiKeysList.innerHTML = response.keys.length
         ? response.keys.map((key) => `
-            <div class="api-key-row">
+            <div class="api-key-row" data-key-id="${escapeHtml(key.id)}">
               <div class="api-key-info">
                 <span class="api-key-label">${escapeHtml(key.label)}</span>
                 <span class="api-key-meta">${escapeHtml(formatDate(key.createdAt))}</span>
               </div>
-              <button type="button" class="text-button danger" data-delete-key="${escapeHtml(key.id)}">delete</button>
+              <button type="button" class="icon-action danger" data-delete-key="${escapeHtml(key.id)}" aria-label="Delete key" title="Delete key"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             </div>
           `).join("")
         : '<div class="api-keys-empty">No API keys. Create one for CLI access.</div>';
+    }
+
+    function showNewKey(keyId, key) {
+      const row = apiKeysList.querySelector(`[data-key-id="${keyId}"]`);
+      if (!row) {
+        return;
+      }
+      const existing = row.querySelector(".api-key-secret");
+      if (existing) {
+        existing.remove();
+      }
+      const secret = document.createElement("div");
+      secret.className = "api-key-secret";
+      secret.innerHTML = `<code>${escapeHtml(key)}</code><button type="button" class="icon-action" data-copy-key="${escapeHtml(key)}" aria-label="Copy key" title="Copy key"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="7" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 5.5V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>`;
+      const deleteBtn = row.querySelector(".icon-action[data-delete-key]");
+      row.insertBefore(secret, deleteBtn);
     }
 
     async function loadNotes(query) {
       const response = await api(`/api/notes?q=${encodeURIComponent(query)}`);
       searchHint.textContent = response.notes.length
         ? `${response.notes.length} note${response.notes.length === 1 ? "" : "s"}`
-        : query.trim()
-          ? "No matches"
-          : "No notes yet";
+        : "";
 
       noteList.innerHTML = response.notes.length
         ? response.notes
@@ -422,6 +444,86 @@
       if (isPublic && !payload.viewer.isOwner && !payload.viewer.commenterName) {
         openIdentityModal(refs, true);
       }
+      connectWebSocket(refs, isPublic);
+    }
+
+    function connectWebSocket(refsArg, publicMode) {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const param = publicMode ? `shareId=${encodeURIComponent(shareId)}` : `noteId=${encodeURIComponent(noteId)}`;
+      const wsUrl = `${protocol}//${location.host}/?${param}`;
+      let reconnectDelay = 1000;
+      let ws;
+
+      function connect() {
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => { reconnectDelay = 1000; };
+        ws.onmessage = (event) => {
+          let msg;
+          try { msg = JSON.parse(event.data); } catch { return; }
+          if (msg.type !== "updated") {
+            return;
+          }
+          if (!state.note || msg.updatedAt === state.note.updatedAt) {
+            return;
+          }
+          reloadFromServer(refsArg, publicMode);
+        };
+        ws.onclose = () => {
+          setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * 1.5, 15000);
+            connect();
+          }, reconnectDelay);
+        };
+      }
+
+      connect();
+    }
+
+    async function reloadFromServer(refsArg, publicMode) {
+      const endpoint = publicMode ? `/api/share/${shareId}` : `/api/notes/${noteId}`;
+      const payload = await api(endpoint);
+
+      if (!publicMode && state.saveStatus === "Saving") {
+        return;
+      }
+
+      state.note.updatedAt = payload.note.updatedAt;
+      state.threads = payload.threads;
+      state.viewer = payload.viewer;
+
+      if (publicMode) {
+        state.note.markdown = payload.note.markdown;
+        if (refsArg.previewContent) {
+          refsArg.previewContent.innerHTML = payload.note.renderedHtml || "";
+        }
+        if (refsArg.topbarTitle) {
+          refsArg.topbarTitle.textContent = payload.note.title || "untitled";
+        }
+      } else {
+        if (state.saveStatus !== "Saving") {
+          state.note.markdown = payload.note.markdown;
+          state.note.title = payload.note.title;
+          if (refsArg.editorTextarea && refsArg.editorTextarea.value !== payload.note.markdown) {
+            const scrollTop = refsArg.editorTextarea.scrollTop;
+            const selStart = refsArg.editorTextarea.selectionStart;
+            const selEnd = refsArg.editorTextarea.selectionEnd;
+            refsArg.editorTextarea.value = payload.note.markdown;
+            refsArg.editorTextarea.scrollTop = scrollTop;
+            refsArg.editorTextarea.setSelectionRange(selStart, selEnd);
+          }
+          if (refsArg.titleInput && refsArg.titleInput.value !== payload.note.title) {
+            refsArg.titleInput.value = payload.note.title;
+          }
+          if (refsArg.previewContent) {
+            refsArg.previewContent.innerHTML = payload.note.renderedHtml || "";
+          }
+        }
+      }
+
+      if (refsArg.commenterLabel) {
+        refsArg.commenterLabel.textContent = payload.viewer.commenterName || "anonymous";
+      }
+      syncThreadLayout(refsArg);
     }
 
     async function reloadThreads(publicMode) {
@@ -498,12 +600,13 @@
       <div class="app-root">
         <header class="topbar">
           <div class="topbar-left">
+            <button type="button" class="icon-button ghost" id="notesButton" aria-label="Back to notes">&lsaquo;</button>
             <input id="titleInput" class="title-input" type="text" spellcheck="false" value="untitled" />
             <span class="status-text" id="saveStatus"></span>
           </div>
           <div class="topbar-right">
-            <button type="button" class="text-button" id="notesButton">notes</button>
-            <button type="button" class="text-button" id="shareButton">share</button>
+            <button type="button" class="text-button" id="previewFab">preview</button>
+            <button type="button" class="text-button topbar-desktop" id="shareButton">share</button>
             <button type="button" class="icon-button topbar-desktop" id="newNoteButton" aria-label="New note">+</button>
             <button type="button" class="text-button topbar-desktop" id="logoutButton">logout</button>
             <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
@@ -530,7 +633,6 @@
             </div>
           </section>
         </main>
-        <button type="button" class="preview-fab" id="previewFab">Preview</button>
         <div class="modal-backdrop hidden" id="modalBackdrop"></div>
       </div>
     `;
