@@ -14,10 +14,13 @@
 
   const themeIcon = window.__themeIcon || ((t) => t === "dark" ? "☀" : "☾");
 
+  const shareAccess = document.body.dataset.shareAccess || "";
+
   const state = {
     page,
     noteId,
     shareId,
+    shareAccess,
     note: null,
     viewer: null,
     threads: [],
@@ -100,11 +103,18 @@
       }, 160);
     });
 
-    noteList.addEventListener("click", (event) => {
-      const row = event.target.closest("[data-note-id]");
-      if (!row) {
+    noteList.addEventListener("click", async (event) => {
+      const deleteBtn = event.target.closest(".note-delete-btn");
+      if (deleteBtn) {
+        event.stopPropagation();
+        const id = deleteBtn.dataset.noteId;
+        if (!id || !confirm("Delete this note?")) return;
+        await api(`/api/notes/${id}`, { method: "DELETE" });
+        loadNotes(searchInput.value);
         return;
       }
+      const row = event.target.closest("[data-note-id]");
+      if (!row) return;
       window.location.href = `/notes/${row.dataset.noteId}`;
     });
 
@@ -176,11 +186,22 @@
 
     async function loadNotes(query) {
       const response = await api(`/api/notes?q=${encodeURIComponent(query)}`);
-      searchHint.textContent = response.notes.length
-        ? `${response.notes.length} note${response.notes.length === 1 ? "" : "s"}`
-        : "";
+      const hasNotes = response.notes.length > 0;
+      const hasQuery = query.trim().length > 0;
 
-      noteList.innerHTML = response.notes.length
+      document.querySelector(".list-search-wrap").style.display = (hasNotes || hasQuery) ? "" : "none";
+      searchHint.textContent = hasNotes ? `${response.notes.length} note${response.notes.length === 1 ? "" : "s"}` : "";
+
+      if (!hasNotes && !hasQuery) {
+        noteList.innerHTML = `<div class="empty-state-create"><p class="empty-state-text">No notes yet.</p><button type="button" class="empty-state-button" id="emptyCreateBtn">Create note</button></div>`;
+        document.getElementById("emptyCreateBtn").addEventListener("click", async () => {
+          const payload = await api("/api/notes", { method: "POST" });
+          window.location.href = `/notes/${payload.note.id}`;
+        });
+        return;
+      }
+
+      noteList.innerHTML = hasNotes
         ? response.notes
             .map(
               (note) => `
@@ -189,17 +210,22 @@
                     <div class="note-row-title">${escapeHtml(note.title || "untitled")}</div>
                     <div class="note-row-snippet">${escapeHtml(note.snippet || "Empty note")}</div>
                   </div>
-                  <div class="note-row-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
+                  <div class="note-row-right">
+                    <div class="note-row-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
+                    <button type="button" class="icon-action danger note-delete-btn" data-note-id="${escapeHtml(note.id)}" aria-label="Delete note" title="Delete note"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                  </div>
                 </div>
               `,
             )
             .join("")
-        : `<div class="empty-state">${query.trim() ? "No notes match your search." : "No notes yet. Press + to create one."}</div>`;
+        : `<div class="empty-state">No notes match your search.</div>`;
     }
   }
 
   function initNotePage(isPublic) {
-    app.innerHTML = isPublic ? renderPublicLayout() : renderEditorLayout();
+    const isPublicEdit = isPublic && shareAccess === "edit";
+    const isPublicView = isPublic && shareAccess === "view";
+    app.innerHTML = isPublicEdit ? renderPublicEditorLayout() : isPublic ? renderPublicLayout(isPublicView) : renderEditorLayout();
 
     const previewScroll = document.getElementById("previewScroll");
     const previewCanvas = document.getElementById("previewCanvas");
@@ -261,11 +287,9 @@
     }
 
     if (shareButton) {
-      shareButton.addEventListener("click", () => {
-        if (!state.note) {
-          return;
-        }
-        window.open(state.note.shareUrl, "_blank");
+      shareButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleSharePopover(refs);
       });
     }
 
@@ -289,38 +313,84 @@
       logoutButton.addEventListener("click", logoutOwner);
     }
 
-    if (editorTextarea) {
-      editorTextarea.addEventListener("input", () => {
-        state.note.markdown = editorTextarea.value;
-        setSaveStatus(refs, "Saving");
-        scheduleRender(refs);
-        scheduleSave();
+    let collabEditor = null;
+
+    function initCollabEditor() {
+      if (!editorTextarea) return;
+      import("/static/collab-editor.js").then(({ createCollabEditor }) => {
+        collabEditor = createCollabEditor(editorTextarea, {
+          noteId: isPublic ? undefined : noteId,
+          shareId: isPublic ? shareId : undefined,
+          name: isPublic ? (state.viewer?.commenterName || "Anonymous") : "Owner",
+          onReady: (payload) => {
+            state.note = {
+              ...(state.note || {}),
+              id: payload.noteId,
+              title: payload.title,
+              shareId: payload.shareId,
+              markdown: payload.markdown,
+            };
+            if (refs.titleInput && document.activeElement !== refs.titleInput) {
+              refs.titleInput.value = payload.title;
+            }
+            if (refs.topbarTitle) refs.topbarTitle.textContent = payload.title || "untitled";
+            scheduleRender(refs);
+          },
+          onTextChange: (text) => {
+            if (!state.note) {
+              state.note = { id: noteId || "", title: "untitled", shareId: shareId || "", markdown: text };
+            } else {
+              state.note.markdown = text;
+            }
+            scheduleRender(refs);
+          },
+          onConnectionChange: (connected) => {
+            setSaveStatus(refs, connected ? "" : "Disconnected");
+            const banner = document.getElementById("disconnectedBanner");
+            if (banner) banner.classList.toggle("hidden", connected);
+          },
+        });
       });
+    }
+
+    if (editorTextarea && !isPublic) {
+      initCollabEditor();
     }
 
     if (titleInput) {
+      let titleSaveTimer = null;
       titleInput.addEventListener("input", () => {
+        if (!state.note) {
+          return;
+        }
         state.note.title = titleInput.value;
-        setSaveStatus(refs, "Saving");
-        scheduleSave();
+        clearTimeout(titleSaveTimer);
+        titleSaveTimer = setTimeout(async () => {
+          await api(`/api/notes/${noteId}`, {
+            method: "PUT",
+            body: { title: titleInput.value },
+          });
+        }, 500);
       });
     }
 
-    selectionBubble.addEventListener("click", () => {
-      if (!state.pendingAnchor) {
-        return;
-      }
-      const anchor = state.pendingAnchor;
-      window.getSelection()?.removeAllRanges();
-      selectionBubble.classList.add("hidden");
-      openComposerModal({
-        mode: "thread",
-        anchor,
-        refs,
+    if (selectionBubble) {
+      selectionBubble.addEventListener("click", () => {
+        if (!state.pendingAnchor) {
+          return;
+        }
+        const anchor = state.pendingAnchor;
+        window.getSelection()?.removeAllRanges();
+        selectionBubble.classList.add("hidden");
+        openComposerModal({
+          mode: "thread",
+          anchor,
+          refs,
+        });
       });
-    });
+    }
 
-    previewScroll.addEventListener("scroll", () => scheduleLayout(refs));
+    if (previewScroll) previewScroll.addEventListener("scroll", () => scheduleLayout(refs));
     window.addEventListener("resize", () => scheduleLayout(refs));
 
     document.addEventListener("selectionchange", () => {
@@ -376,7 +446,7 @@
       }
     }
 
-    previewCanvas.addEventListener("click", (event) => {
+    if (previewCanvas) previewCanvas.addEventListener("click", (event) => {
       if (event.target.closest(".thread-rail") || event.target.closest(".selection-bubble")) {
         return;
       }
@@ -408,7 +478,7 @@
       });
     }
 
-    threadRail.addEventListener("click", async (event) => {
+    if (threadRail) threadRail.addEventListener("click", async (event) => {
       const button = event.target.closest("button[data-action]");
       const card = event.target.closest("[data-thread-id]");
 
@@ -438,13 +508,28 @@
     });
 
     async function loadNote() {
-      const endpoint = isPublic ? `/api/share/${shareId}` : `/api/notes/${noteId}`;
+      if (!isPublic) {
+        // Load note metadata (shareAccess, threads, etc.) via REST
+        const payload = await api(`/api/notes/${noteId}`);
+        applyNotePayload(payload, refs, false);
+        return;
+      }
+
+      const endpoint = `/api/share/${shareId}`;
       const payload = await api(endpoint);
       applyNotePayload(payload, refs, isPublic);
-      if (isPublic && !payload.viewer.isOwner && !payload.viewer.commenterName) {
-        openIdentityModal(refs, true);
+
+      if (isPublicEdit) {
+        if (!payload.viewer.isOwner && !payload.viewer.commenterName) {
+          await openIdentityModalAsync(refs);
+        }
+        initCollabEditor();
+      } else {
+        if (shareAccess === "comment" && !payload.viewer.isOwner && !payload.viewer.commenterName) {
+          openIdentityModal(refs, true);
+        }
+        connectWebSocket(refs, isPublic);
       }
-      connectWebSocket(refs, isPublic);
     }
 
     function connectWebSocket(refsArg, publicMode) {
@@ -568,30 +653,16 @@
     function scheduleRender(refsArg) {
       clearTimeout(state.renderTimer);
       state.renderTimer = setTimeout(async () => {
-        const payload = await api("/api/render", {
+        const endpoint = isPublic ? `/api/share/${shareId}/render` : "/api/render";
+        const payload = await api(endpoint, {
           method: "POST",
-          body: { markdown: state.note.markdown },
+          body: { markdown: state.note?.markdown || "" },
         });
-        refsArg.previewContent.innerHTML = payload.html;
+        if (refsArg.previewContent) {
+          refsArg.previewContent.innerHTML = payload.html;
+        }
         syncThreadLayout(refsArg);
-      }, 120);
-    }
-
-    function scheduleSave() {
-      if (state.page !== "editor") {
-        return;
-      }
-      clearTimeout(state.saveTimer);
-      state.saveTimer = setTimeout(async () => {
-        await api(`/api/notes/${state.note.id}`, {
-          method: "PUT",
-          body: {
-            title: state.note.title,
-            markdown: state.note.markdown,
-          },
-        });
-        setSaveStatus(refs, "Saved");
-      }, 500);
+      }, 150);
     }
   }
 
@@ -606,14 +677,17 @@
           </div>
           <div class="topbar-right">
             <button type="button" class="text-button" id="previewFab">preview</button>
-            <button type="button" class="text-button topbar-desktop" id="shareButton">share</button>
-            <button type="button" class="icon-button topbar-desktop" id="newNoteButton" aria-label="New note">+</button>
-            <button type="button" class="text-button topbar-desktop" id="logoutButton">logout</button>
+            <div class="share-popover-wrap" id="sharePopoverWrap">
+              <button type="button" class="text-button" id="shareButton">share</button>
+              <div class="share-popover hidden" id="sharePopover"></div>
+            </div>
+            <button type="button" class="icon-button ghost" id="logoutButton" aria-label="Logout" title="Logout"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 2H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.5 11.5L14 8l-3.5-3.5M6 8h8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
           </div>
         </header>
         <main class="workspace">
           <section class="editor-pane">
+            <div id="disconnectedBanner" class="editor-disconnected hidden">Disconnected. Reconnecting...</div>
             <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
           </section>
           <section class="preview-stage" id="previewStage">
@@ -638,14 +712,23 @@
     `;
   }
 
-  function renderPublicLayout() {
+  function renderPublicLayout(viewOnly) {
+    const commentControls = viewOnly ? "" : `
+            <button type="button" class="preview-control-button" id="commentsButton">hide comments</button>
+            <button type="button" class="preview-control-button" id="resolvedButton">resolved</button>`;
+    const commentElements = viewOnly ? "" : `
+              <div class="highlight-layer" id="highlightLayer"></div>
+              <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
+              <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
+              <aside class="thread-rail" id="threadRail"></aside>`;
+    const subtitle = viewOnly ? "" : `<div class="topbar-title-subtle">comments as <span id="commenterLabel">anonymous</span></div>`;
     return `
       <div class="app-root">
         <header class="topbar public-page-topbar">
           <div class="topbar-left">
             <div>
               <div class="topbar-title" id="topbarTitle">note</div>
-              <div class="topbar-title-subtle">comments as <span id="commenterLabel">anonymous</span></div>
+              ${subtitle}
             </div>
           </div>
           <div class="topbar-right">
@@ -654,18 +737,57 @@
         </header>
         <main class="preview-stage public" id="previewStage">
           <div class="preview-controls" id="previewControls">
-            <button type="button" class="preview-control-button" id="commentsButton">hide comments</button>
-            <button type="button" class="preview-control-button" id="resolvedButton">resolved</button>
+            ${commentControls}
           </div>
           <div class="preview-scroll" id="previewScroll">
             <div class="preview-canvas" id="previewCanvas">
               <div class="preview-content markdown-body" id="previewContent"></div>
-              <div class="highlight-layer" id="highlightLayer"></div>
-              <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
-              <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
-              <aside class="thread-rail" id="threadRail"></aside>
+              ${commentElements}
             </div>
           </div>
+        </main>
+        <div class="modal-backdrop hidden" id="modalBackdrop"></div>
+      </div>
+    `;
+  }
+
+  function renderPublicEditorLayout() {
+    return `
+      <div class="app-root">
+        <header class="topbar public-page-topbar">
+          <div class="topbar-left">
+            <div>
+              <div class="topbar-title" id="topbarTitle">note</div>
+              <div class="topbar-title-subtle">editing as <span id="commenterLabel">anonymous</span></div>
+            </div>
+            <span class="status-text" id="saveStatus"></span>
+          </div>
+          <div class="topbar-right">
+            <button type="button" class="text-button" id="previewFab">preview</button>
+            <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
+          </div>
+        </header>
+        <main class="workspace">
+          <section class="editor-pane">
+            <div id="disconnectedBanner" class="editor-disconnected hidden">Disconnected. Reconnecting...</div>
+            <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
+          </section>
+          <section class="preview-stage" id="previewStage">
+            <button type="button" class="preview-close-button" id="previewCloseButton" aria-label="Close preview">&times;</button>
+            <div class="preview-controls" id="previewControls">
+              <button type="button" class="preview-control-button" id="commentsButton">hide comments</button>
+              <button type="button" class="preview-control-button" id="resolvedButton">resolved</button>
+            </div>
+            <div class="preview-scroll" id="previewScroll">
+              <div class="preview-canvas" id="previewCanvas">
+                <div class="preview-content markdown-body" id="previewContent"></div>
+                <div class="highlight-layer" id="highlightLayer"></div>
+                <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
+                <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
+                <aside class="thread-rail" id="threadRail"></aside>
+              </div>
+            </div>
+          </section>
         </main>
         <div class="modal-backdrop hidden" id="modalBackdrop"></div>
       </div>
@@ -684,6 +806,51 @@
         }, 1500);
       }
     }
+  }
+
+  function toggleSharePopover(refs) {
+    const popover = document.getElementById("sharePopover");
+    if (!popover) return;
+    if (!popover.classList.contains("hidden")) { popover.classList.add("hidden"); return; }
+    const access = state.note?.shareAccess || "none";
+    const shareUrl = `${location.origin}/s/${state.note?.shareId || ""}`;
+    popover.innerHTML = `
+      <div class="share-popover-row">
+        <select id="shareAccessSelect">
+          <option value="none" ${access === "none" ? "selected" : ""}>Not shared</option>
+          <option value="view" ${access === "view" ? "selected" : ""}>View only</option>
+          <option value="comment" ${access === "comment" ? "selected" : ""}>View & comment</option>
+          <option value="edit" ${access === "edit" ? "selected" : ""}>Edit & comment</option>
+        </select>
+        <button type="button" id="shareCopyBtn" class="${access === "none" ? "share-copy-disabled" : ""}" ${access === "none" ? "disabled" : ""}>copy link</button>
+      </div>
+    `;
+    popover.classList.remove("hidden");
+    const select = popover.querySelector("#shareAccessSelect");
+    const copyBtn = popover.querySelector("#shareCopyBtn");
+    select.addEventListener("change", async () => {
+      if (!state.note) return;
+      const val = select.value;
+      state.note.shareAccess = val;
+      await api(`/api/notes/${state.note.id}`, { method: "PUT", body: { shareAccess: val } });
+      if (val === "none") {
+        copyBtn.disabled = true; copyBtn.classList.add("share-copy-disabled");
+      } else {
+        copyBtn.disabled = false; copyBtn.classList.remove("share-copy-disabled");
+      }
+    });
+    copyBtn.addEventListener("click", async () => {
+      if (select.value === "none") return;
+      try { await navigator.clipboard.writeText(shareUrl); copyBtn.textContent = "copied!"; setTimeout(() => { copyBtn.textContent = "copy link"; }, 1500); } catch {}
+    });
+    const closeHandler = (e) => { if (!popover.contains(e.target) && e.target.id !== "shareButton") { popover.classList.add("hidden"); document.removeEventListener("click", closeHandler); } };
+    setTimeout(() => document.addEventListener("click", closeHandler), 0);
+  }
+
+  function openIdentityModalAsync(refs) {
+    return new Promise((resolve) => {
+      openIdentityModal(refs, false, resolve);
+    });
   }
 
   function updateResolvedButton(button) {
@@ -956,7 +1123,7 @@
     refs.selectionBubble.classList.remove("hidden");
   }
 
-  function openIdentityModal(refs, mandatory) {
+  function openIdentityModal(refs, mandatory, onDone) {
     openModal(refs, {
       title: "",
       description: "",
@@ -984,6 +1151,7 @@
           refs.commenterLabel.textContent = payload.viewer.commenterName || "anonymous";
         }
         syncThreadLayout(refs);
+        if (onDone) onDone();
       },
     });
   }

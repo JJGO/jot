@@ -8,11 +8,17 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import {
   type CollabState,
+  type ClientMutation,
+  type ClientMutationMessage,
+  type ClientPresenceMessage,
   type SavedCollabState,
-  type Op,
+  type ServerHelloMessage,
+  type ServerMutationMessage,
+  type ServerPresenceMessage,
+  type ServerPresenceLeaveMessage,
+  applyClientMutations,
   collabFromMarkdown,
   collabToMarkdown,
-  applyOpToServer,
   saveCollabState,
   loadCollabState,
   newCollabState,
@@ -51,22 +57,31 @@ type CommentThread = {
   messages: CommentMessage[];
 };
 
+type ShareAccess = "none" | "view" | "comment" | "edit";
+
 type NoteMetaFile = {
   id: string;
   title: string;
   shareId: string;
+  shareAccess: ShareAccess;
   createdAt: string;
   updatedAt: string;
   threads: CommentThread[];
+  collab?: SavedCollabState;
+  collabState?: SavedCollabState;
 };
 
-type NoteRecord = NoteMetaFile & {
+type NoteRecord = {
+  id: string;
+  title: string;
+  shareId: string;
+  shareAccess: ShareAccess;
+  createdAt: string;
+  updatedAt: string;
+  threads: CommentThread[];
   markdown: string;
   collab: CollabState;
-};
-
-type NoteMetaFileWithCollab = NoteMetaFile & {
-  collabState?: SavedCollabState;
+  clientAcks: Map<string, number>;
 };
 
 type NoteSummary = {
@@ -179,12 +194,12 @@ app.get("/notes/:id", requireOwnerPage, (req, res) => {
 
 app.get("/s/:shareId", (req, res) => {
   const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
+  if (!note || note.shareAccess === "none") {
     res.status(404).send(renderSimplePage("Not found", `<p>Shared note not found.</p>`));
     return;
   }
 
-  res.send(renderAppShell("public", note.title, { shareId: note.shareId }));
+  res.send(renderAppShell("public", note.title, { shareId: note.shareId, shareAccess: note.shareAccess }));
 });
 
 app.get("/api/viewer", (req, res) => {
@@ -290,8 +305,11 @@ app.post("/api/notes/:id/edit", requireOwnerApi, (req, res) => {
     return;
   }
 
+  let workingCollab = note.collab;
   let markdown = note.markdown;
+  let senderCounter = 0;
   const errors: string[] = [];
+  const idListUpdates: ServerMutationMessage["idListUpdates"] = [];
 
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i];
@@ -315,7 +333,39 @@ app.post("/api/notes/:id/edit", requireOwnerApi, (req, res) => {
       continue;
     }
 
-    markdown = markdown.slice(0, firstIndex) + newText + markdown.slice(firstIndex + oldText.length);
+    let nextClientCounter = senderCounter + 1;
+    const mutations: ClientMutation[] = [];
+
+    if (oldText.length > 0) {
+      mutations.push({
+        name: "delete",
+        clientCounter: nextClientCounter++,
+        args: {
+          startId: idAtIndex(workingCollab, firstIndex),
+          endId: idAtIndex(workingCollab, firstIndex + oldText.length - 1),
+          contentLength: oldText.length,
+        },
+      });
+    }
+
+    if (newText.length > 0) {
+      mutations.push({
+        name: "insert",
+        clientCounter: nextClientCounter++,
+        args: {
+          before: firstIndex > 0 ? idBeforeIndex(workingCollab, firstIndex) : null,
+          id: { bunchId: crypto.randomUUID(), counter: 0 },
+          content: newText,
+          isInWord: false,
+        },
+      });
+    }
+
+    const result = applyClientMutations(workingCollab, mutations);
+    workingCollab = result.state;
+    markdown = result.markdown;
+    idListUpdates.push(...result.idListUpdates);
+    senderCounter = mutations.at(-1)?.clientCounter || senderCounter;
   }
 
   if (errors.length > 0) {
@@ -323,12 +373,30 @@ app.post("/api/notes/:id/edit", requireOwnerApi, (req, res) => {
     return;
   }
 
+  note.collab = workingCollab;
   note.markdown = markdown;
   note.updatedAt = nowIso();
-  if (req.body.title) {
-    note.title = normalizeTitle(String(req.body.title));
+  const titleChanged = Object.prototype.hasOwnProperty.call(req.body || {}, "title")
+    && normalizeTitle(String(req.body.title || note.title)) !== note.title;
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "title")) {
+    note.title = normalizeTitle(String(req.body.title || note.title));
   }
-  persistNote(note);
+  persistNote(note, false);
+
+  if (titleChanged) {
+    broadcastEditorHello(note);
+  } else if (idListUpdates.length > 0) {
+    broadcastEditorMutation(note, {
+      type: "mutation",
+      senderId: "__api__",
+      senderCounter,
+      serverCounter: note.collab.serverCounter,
+      markdown: note.markdown,
+      idListUpdates,
+    });
+  }
+  broadcastNoteUpdate(note);
+
   res.json({ ok: true, savedAt: note.updatedAt });
 });
 
@@ -400,15 +468,68 @@ app.put("/api/notes/:id", requireOwnerApi, (req, res) => {
     return;
   }
 
-  note.title = normalizeTitle(String(req.body.title || note.title));
-  const newMarkdown = String(req.body.markdown || "");
-  if (newMarkdown !== note.markdown) {
-    note.collab = collabFromMarkdown(newMarkdown);
-    note.markdown = newMarkdown;
+  const titleProvided = Object.prototype.hasOwnProperty.call(req.body || {}, "title");
+  const markdownProvided = Object.prototype.hasOwnProperty.call(req.body || {}, "markdown");
+  const shareAccessProvided = Object.prototype.hasOwnProperty.call(req.body || {}, "shareAccess");
+  const nextTitle = titleProvided ? normalizeTitle(String(req.body.title || note.title)) : note.title;
+  const nextMarkdown = markdownProvided ? String(req.body.markdown || "") : note.markdown;
+  const nextShareAccess = shareAccessProvided && ["none", "view", "comment", "edit"].includes(req.body.shareAccess)
+    ? (req.body.shareAccess as ShareAccess)
+    : note.shareAccess;
+  const titleChanged = nextTitle !== note.title;
+  const markdownChanged = nextMarkdown !== note.markdown;
+
+  const shareAccessChanged = nextShareAccess !== note.shareAccess;
+
+  note.title = nextTitle;
+  note.shareAccess = nextShareAccess;
+  if (markdownChanged) {
+    note.collab = collabFromMarkdown(nextMarkdown, note.collab.serverCounter + 1);
+    note.markdown = nextMarkdown;
   }
   note.updatedAt = nowIso();
-  persistNote(note);
-  res.json({ ok: true, savedAt: note.updatedAt });
+  persistNote(note, false);
+  if (shareAccessChanged) {
+    enforceShareAccessForConnections(note);
+  }
+  if (titleChanged || markdownChanged || shareAccessChanged) {
+    broadcastEditorHello(note);
+    broadcastNoteUpdate(note);
+  }
+  res.json({ ok: true, savedAt: note.updatedAt, shareAccess: note.shareAccess });
+});
+
+app.get("/api/notes/:id/collab", requireOwnerApi, (req, res) => {
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    noteId: note.id,
+    title: note.title,
+    shareId: note.shareId,
+    shareUrl: makeShareUrl(req, note.shareId),
+    serverCounter: note.collab.serverCounter,
+    collabState: saveCollabState(note.collab),
+  });
+});
+
+app.get("/api/share/:shareId/collab", (req, res) => {
+  const note = requireShareAccess(req, res, "edit");
+  if (!note) return;
+
+  res.json({
+    ok: true,
+    noteId: note.id,
+    title: note.title,
+    shareId: note.shareId,
+    shareUrl: makeShareUrl(req, note.shareId),
+    serverCounter: note.collab.serverCounter,
+    collabState: saveCollabState(note.collab),
+  });
 });
 
 app.post("/api/render", requireOwnerApi, (req, res) => {
@@ -416,22 +537,23 @@ app.post("/api/render", requireOwnerApi, (req, res) => {
   res.json({ ok: true, html: renderMarkdown(markdown) });
 });
 
+app.post("/api/share/:shareId/render", (req, res) => {
+  const note = requireShareAccess(req, res, "view");
+  if (!note) return;
+  const markdown = String(req.body.markdown || "");
+  res.json({ ok: true, html: renderMarkdown(markdown) });
+});
+
 app.get("/api/share/:shareId", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "view");
+  if (!note) return;
 
   res.json({ ok: true, ...serializeNoteForClient(note, req) });
 });
 
 app.post("/api/share/:shareId/identity", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const name = normalizeCommenterName(String(req.body.name || ""));
   if (!name) {
@@ -449,11 +571,8 @@ app.post("/api/share/:shareId/identity", (req, res) => {
 });
 
 app.post("/api/share/:shareId/threads", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const identity = ensureCommentAuthor(req, res);
   if (!identity) {
@@ -494,11 +613,8 @@ app.post("/api/share/:shareId/threads", (req, res) => {
 });
 
 app.post("/api/share/:shareId/threads/:threadId/replies", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const thread = note.threads.find((item) => item.id === String(req.params.threadId));
   if (!thread) {
@@ -542,11 +658,8 @@ app.post("/api/share/:shareId/threads/:threadId/replies", (req, res) => {
 });
 
 app.patch("/api/share/:shareId/threads/:threadId", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const thread = note.threads.find((item) => item.id === String(req.params.threadId));
   if (!thread) {
@@ -567,11 +680,8 @@ app.patch("/api/share/:shareId/threads/:threadId", (req, res) => {
 });
 
 app.delete("/api/share/:shareId/threads/:threadId", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const thread = note.threads.find((item) => item.id === String(req.params.threadId));
   if (!thread) {
@@ -591,11 +701,8 @@ app.delete("/api/share/:shareId/threads/:threadId", (req, res) => {
 });
 
 app.patch("/api/share/:shareId/messages/:messageId", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const located = locateMessage(note, String(req.params.messageId));
   if (!located) {
@@ -623,11 +730,8 @@ app.patch("/api/share/:shareId/messages/:messageId", (req, res) => {
 });
 
 app.delete("/api/share/:shareId/messages/:messageId", (req, res) => {
-  const note = findNoteByShareId(String(req.params.shareId));
-  if (!note) {
-    res.status(404).json({ ok: false, error: "Shared note not found." });
-    return;
-  }
+  const note = requireShareAccess(req, res, "comment");
+  if (!note) return;
 
   const located = locateMessage(note, String(req.params.messageId));
   if (!located) {
@@ -664,37 +768,311 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-type WatchEntry = { ws: WebSocket; noteId: string; shareId: string };
-const watchers: WatchEntry[] = [];
+const CURSOR_COLORS = ["#4285f4", "#ea4335", "#34a853", "#fbbc04", "#9c27b0", "#ff6d00", "#00bcd4", "#e91e63"];
+let nextColorIndex = 0;
+
+type ClientConn = {
+  ws: WebSocket;
+  kind: "editor" | "public-editor" | "public-viewer";
+  noteId: string;
+  shareId: string;
+  clientId: string;
+  name: string;
+  color: string;
+  alive: boolean;
+  selection?: ClientPresenceMessage["selection"];
+};
+
+const clients: ClientConn[] = [];
+let clientIdCounter = 0;
+
+const heartbeatInterval = setInterval(() => {
+  for (const conn of clients) {
+    if (!conn.alive) {
+      conn.ws.terminate();
+      continue;
+    }
+    conn.alive = false;
+    if (conn.ws.readyState === 1) {
+      conn.ws.ping();
+    }
+  }
+}, 30000);
+
+wss.on("close", () => clearInterval(heartbeatInterval));
 
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url || "/", `http://localhost:${port}`);
   const noteId = url.searchParams.get("noteId") || "";
   const shareId = url.searchParams.get("shareId") || "";
 
-  if (!noteId && !shareId) {
-    ws.close();
+  if (noteId) {
+    if (!isOwnerAuthenticatedIncomingRequest(req)) {
+      ws.close();
+      return;
+    }
+
+    const note = notes.get(noteId);
+    if (!note) {
+      ws.close();
+      return;
+    }
+
+    const clientId = `c${++clientIdCounter}`;
+    const color = CURSOR_COLORS[nextColorIndex++ % CURSOR_COLORS.length];
+    const conn: ClientConn = { ws, kind: "editor", noteId: note.id, shareId: note.shareId, clientId, name: "Owner", color, alive: true };
+    clients.push(conn);
+    sendServerMessage(ws, { ...buildHelloMessage(note), clientId });
+    sendExistingPresence(conn);
+
+    ws.on("pong", () => { conn.alive = true; });
+    ws.on("message", (data) => handleEditorMessage(conn, String(data)));
+    ws.on("close", () => handleDisconnect(conn));
+    ws.on("error", () => handleDisconnect(conn));
     return;
   }
 
-  const entry: WatchEntry = { ws, noteId, shareId };
-  watchers.push(entry);
-
-  ws.on("close", () => {
-    const index = watchers.indexOf(entry);
-    if (index !== -1) {
-      watchers.splice(index, 1);
+  if (shareId) {
+    const note = findNoteByShareId(shareId);
+    if (!note || note.shareAccess === "none") {
+      ws.close();
+      return;
     }
-  });
+
+    if (note.shareAccess === "edit") {
+      const commenterName = getCommenterIdentityFromHeaders(req.headers).name;
+      const clientId = `c${++clientIdCounter}`;
+      const color = CURSOR_COLORS[nextColorIndex++ % CURSOR_COLORS.length];
+      const conn: ClientConn = { ws, kind: "public-editor", noteId: note.id, shareId: note.shareId, clientId, name: commenterName || "Anonymous", color, alive: true };
+      clients.push(conn);
+      sendServerMessage(ws, { ...buildHelloMessage(note), clientId });
+      sendExistingPresence(conn);
+
+      ws.on("pong", () => { conn.alive = true; });
+      ws.on("message", (data) => handleEditorMessage(conn, String(data)));
+      ws.on("close", () => handleDisconnect(conn));
+      ws.on("error", () => handleDisconnect(conn));
+      return;
+    }
+
+    const clientId = `c${++clientIdCounter}`;
+    const conn: ClientConn = { ws, kind: "public-viewer", noteId: note.id, shareId: note.shareId, clientId, name: "", color: "", alive: true };
+    clients.push(conn);
+    ws.on("pong", () => { conn.alive = true; });
+    ws.on("close", () => handleDisconnect(conn));
+    ws.on("error", () => handleDisconnect(conn));
+    return;
+  }
+
+  ws.close();
 });
 
+function isCollaborativeConn(conn: ClientConn, noteId: string) {
+  return (conn.kind === "editor" || conn.kind === "public-editor") && conn.noteId === noteId;
+}
+
+function handleDisconnect(conn: ClientConn) {
+  const index = clients.indexOf(conn);
+  if (index !== -1) {
+    clients.splice(index, 1);
+  }
+  if (conn.kind === "editor" || conn.kind === "public-editor") {
+    broadcastPresenceLeave(conn);
+  }
+}
+
+function handleEditorMessage(conn: ClientConn, data: string) {
+  let message: ClientMutationMessage | ClientPresenceMessage;
+  try {
+    message = JSON.parse(data);
+  } catch {
+    return;
+  }
+
+  if (message.type === "presence") {
+    const presenceMsg = message as ClientPresenceMessage;
+    if (presenceMsg.clientId !== conn.clientId) {
+      return;
+    }
+    conn.selection = presenceMsg.selection;
+    broadcastPresence(conn, presenceMsg);
+    return;
+  }
+
+  if (message.type !== "mutation" || !(message as ClientMutationMessage).clientId || !Array.isArray((message as ClientMutationMessage).mutations) || (message as ClientMutationMessage).mutations.length === 0) {
+    return;
+  }
+
+  const mutationMsg = message as ClientMutationMessage;
+  if (mutationMsg.clientId !== conn.clientId) {
+    return;
+  }
+
+  const note = notes.get(conn.noteId);
+  if (!note) {
+    return;
+  }
+
+  const senderCounter = mutationMsg.mutations.at(-1)?.clientCounter || 0;
+  const lastAcknowledgedCounter = note.clientAcks.get(mutationMsg.clientId) || 0;
+  const freshMutations = mutationMsg.mutations.filter((mutation) => mutation.clientCounter > lastAcknowledgedCounter);
+
+  if (freshMutations.length === 0) {
+    sendServerMessage(conn.ws, {
+      type: "mutation",
+      senderId: mutationMsg.clientId,
+      senderCounter,
+      serverCounter: note.collab.serverCounter,
+      markdown: note.markdown,
+      idListUpdates: [],
+    });
+    return;
+  }
+
+  let result;
+  try {
+    result = applyClientMutations(note.collab, freshMutations);
+  } catch (error) {
+    console.error(error);
+    sendServerMessage(conn.ws, { ...buildHelloMessage(note), clientId: conn.clientId });
+    return;
+  }
+  note.clientAcks.set(mutationMsg.clientId, senderCounter);
+
+  if (!result.changed) {
+    sendServerMessage(conn.ws, {
+      type: "mutation",
+      senderId: mutationMsg.clientId,
+      senderCounter,
+      serverCounter: note.collab.serverCounter,
+      markdown: note.markdown,
+      idListUpdates: [],
+    });
+    return;
+  }
+
+  note.collab = result.state;
+  note.markdown = result.markdown;
+  note.updatedAt = nowIso();
+  persistNote(note, false);
+
+  broadcastEditorMutation(note, {
+    type: "mutation",
+    senderId: mutationMsg.clientId,
+    senderCounter,
+    serverCounter: note.collab.serverCounter,
+    markdown: note.markdown,
+    idListUpdates: result.idListUpdates,
+  });
+  broadcastNoteUpdate(note);
+}
+
+type AnyServerMessage = (ServerHelloMessage & { clientId?: string }) | ServerMutationMessage | ServerPresenceMessage | ServerPresenceLeaveMessage | { type: "updated"; noteId: string; shareId: string; updatedAt: string };
+
+function sendServerMessage(ws: WebSocket, message: AnyServerMessage) {
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify(message));
+  }
+}
+
+function buildHelloMessage(note: NoteRecord): ServerHelloMessage {
+  return {
+    type: "hello",
+    noteId: note.id,
+    title: note.title,
+    shareId: note.shareId,
+    markdown: note.markdown,
+    idListState: saveCollabState(note.collab).idListState,
+    serverCounter: note.collab.serverCounter,
+  };
+}
+
+function sendExistingPresence(target: ClientConn) {
+  for (const conn of clients) {
+    if (conn === target || !isCollaborativeConn(conn, target.noteId) || !conn.selection) {
+      continue;
+    }
+    sendServerMessage(target.ws, {
+      type: "presence",
+      clientId: conn.clientId,
+      name: conn.name,
+      color: conn.color,
+      selection: conn.selection,
+    });
+  }
+}
+
+function broadcastEditorHello(note: NoteRecord) {
+  const message = buildHelloMessage(note);
+  for (const conn of clients) {
+    if (isCollaborativeConn(conn, note.id)) {
+      sendServerMessage(conn.ws, conn.clientId ? { ...message, clientId: conn.clientId } : message);
+    }
+  }
+}
+
+function broadcastEditorMutation(note: NoteRecord, message: ServerMutationMessage) {
+  for (const conn of clients) {
+    if (isCollaborativeConn(conn, note.id)) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function enforceShareAccessForConnections(note: NoteRecord) {
+  for (const conn of [...clients]) {
+    if (conn.shareId !== note.shareId) {
+      continue;
+    }
+    if (conn.kind === "public-editor" && note.shareAccess !== "edit") {
+      try { conn.ws.close(); } catch {}
+      continue;
+    }
+    if (conn.kind === "public-viewer" && note.shareAccess === "none") {
+      try { conn.ws.close(); } catch {}
+    }
+  }
+}
+
 function broadcastNoteUpdate(note: NoteRecord) {
-  const message = JSON.stringify({ type: "updated", noteId: note.id, shareId: note.shareId, updatedAt: note.updatedAt });
-  for (const entry of watchers) {
-    if (entry.noteId === note.id || entry.shareId === note.shareId) {
-      if (entry.ws.readyState === 1) {
-        entry.ws.send(message);
-      }
+  const message = {
+    type: "updated" as const,
+    noteId: note.id,
+    shareId: note.shareId,
+    updatedAt: note.updatedAt,
+  };
+  for (const conn of clients) {
+    if (conn.kind === "public-viewer" && conn.shareId === note.shareId) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function broadcastPresence(sender: ClientConn, message: ClientPresenceMessage) {
+  const outgoing: ServerPresenceMessage = {
+    type: "presence",
+    clientId: sender.clientId,
+    name: sender.name,
+    color: sender.color,
+    selection: message.selection,
+  };
+  for (const conn of clients) {
+    if (conn === sender) continue;
+    if (isCollaborativeConn(conn, sender.noteId)) {
+      sendServerMessage(conn.ws, outgoing);
+    }
+  }
+}
+
+function broadcastPresenceLeave(sender: ClientConn) {
+  const outgoing: ServerPresenceLeaveMessage = {
+    type: "presence-leave",
+    clientId: sender.clientId,
+  };
+  for (const conn of clients) {
+    if (conn === sender) continue;
+    if (isCollaborativeConn(conn, sender.noteId)) {
+      sendServerMessage(conn.ws, outgoing);
     }
   }
 }
@@ -722,7 +1100,7 @@ function loadNotesIntoMemory() {
     }
 
     const markdown = fs.readFileSync(markdownPath, "utf8");
-    const meta = readJson<NoteMetaFileWithCollab | null>(metaPath, null);
+    const meta = readJson<NoteMetaFile | null>(metaPath, null);
     if (!meta) {
       continue;
     }
@@ -740,7 +1118,9 @@ function loadNotesIntoMemory() {
       : [];
 
     let collab: CollabState;
-    if (meta.collabState) {
+    if (meta.collab) {
+      collab = loadCollabState(meta.collab);
+    } else if (meta.collabState) {
       collab = loadCollabState(meta.collabState);
     } else {
       collab = collabFromMarkdown(markdown);
@@ -748,9 +1128,11 @@ function loadNotesIntoMemory() {
 
     notes.set(id, {
       ...meta,
-      markdown,
+      shareAccess: (meta.shareAccess as ShareAccess) || "none",
+      markdown: collabToMarkdown(collab),
       threads,
       collab,
+      clientAcks: new Map(),
     });
   }
 }
@@ -782,11 +1164,13 @@ function createNote() {
     id,
     title: "untitled",
     shareId: createShortId(14),
+    shareAccess: "none",
     createdAt: timestamp,
     updatedAt: timestamp,
     markdown: "",
     threads: [],
     collab: newCollabState(),
+    clientAcks: new Map(),
   };
 
   notes.set(id, note);
@@ -794,22 +1178,25 @@ function createNote() {
   return note;
 }
 
-function persistNote(note: NoteRecord) {
+function persistNote(note: NoteRecord, broadcastUpdate = true) {
   note.markdown = collabToMarkdown(note.collab);
 
-  const meta: NoteMetaFileWithCollab = {
+  const meta: NoteMetaFile = {
     id: note.id,
     title: note.title,
     shareId: note.shareId,
+    shareAccess: note.shareAccess,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
     threads: note.threads,
-    collabState: saveCollabState(note.collab),
+    collab: saveCollabState(note.collab),
   };
 
   fs.writeFileSync(noteMarkdownPath(note.id), note.markdown, "utf8");
   writeJson(noteMetaPath(note.id), meta);
-  broadcastNoteUpdate(note);
+  if (broadcastUpdate) {
+    broadcastNoteUpdate(note);
+  }
 }
 
 function searchNotes(query: string) {
@@ -933,6 +1320,7 @@ function serializeNoteForClient(note: NoteRecord, req: Request) {
       markdown: note.markdown,
       renderedHtml: renderMarkdown(note.markdown),
       shareId: note.shareId,
+      shareAccess: note.shareAccess,
       shareUrl: makeShareUrl(req, note.shareId),
       updatedAt: note.updatedAt,
       createdAt: note.createdAt,
@@ -958,6 +1346,17 @@ function requireOwnerApi(req: Request, res: Response, next: NextFunction) {
   }
 
   next();
+}
+
+const shareAccessLevels: Record<ShareAccess, number> = { none: 0, view: 1, comment: 2, edit: 3 };
+
+function requireShareAccess(req: Request, res: Response, minAccess: ShareAccess): NoteRecord | null {
+  const note = findNoteByShareId(String(req.params.shareId));
+  if (!note || shareAccessLevels[note.shareAccess] < shareAccessLevels[minAccess]) {
+    res.status(404).json({ ok: false, error: "Shared note not found." });
+    return null;
+  }
+  return note;
 }
 
 function countOccurrences(haystack: string, needle: string) {
@@ -1208,8 +1607,24 @@ function clearCookie(req: Request, res: Response, name: string, httpOnly = true)
   res.append("Set-Cookie", `${name}=; Path=/; SameSite=Lax; Max-Age=0${httpOnlyPart}${secure}`);
 }
 
+function headerValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getOwnerSessionTokenFromHeaders(headers: http.IncomingHttpHeaders) {
+  return parseCookies(headerValue(headers.cookie))[ownerSessionCookieName] || null;
+}
+
+function getBearerTokenFromHeaders(headers: http.IncomingHttpHeaders) {
+  const header = headerValue(headers.authorization);
+  if (!header || !header.startsWith("Bearer ")) {
+    return null;
+  }
+  return header.slice(7).trim() || null;
+}
+
 function getOwnerSessionToken(req: Request) {
-  return parseCookies(req.headers.cookie)[ownerSessionCookieName] || null;
+  return getOwnerSessionTokenFromHeaders(req.headers);
 }
 
 function setOwnerSessionCookie(req: Request, res: Response, token: string) {
@@ -1220,22 +1635,26 @@ function clearOwnerSessionCookie(req: Request, res: Response) {
   clearCookie(req, res, ownerSessionCookieName);
 }
 
-function isOwnerAuthenticated(req: Request) {
-  const bearer = getBearerToken(req);
+function isOwnerAuthenticatedHeaders(headers: http.IncomingHttpHeaders) {
+  const bearer = getBearerTokenFromHeaders(headers);
   if (bearer && verifyApiKey(bearer)) {
     return true;
   }
 
-  const token = getOwnerSessionToken(req);
+  const token = getOwnerSessionTokenFromHeaders(headers);
   return Boolean(token && verifyOwnerToken(token));
 }
 
+function isOwnerAuthenticated(req: Request) {
+  return isOwnerAuthenticatedHeaders(req.headers);
+}
+
+function isOwnerAuthenticatedIncomingRequest(req: http.IncomingMessage) {
+  return isOwnerAuthenticatedHeaders(req.headers);
+}
+
 function getBearerToken(req: Request) {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    return null;
-  }
-  return header.slice(7).trim() || null;
+  return getBearerTokenFromHeaders(req.headers);
 }
 
 function verifyApiKey(key: string) {
@@ -1303,12 +1722,16 @@ function listApiKeys() {
   return auth.apiKeys.map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt }));
 }
 
-function getCommenterIdentity(req: Request) {
-  const cookies = parseCookies(req.headers.cookie);
+function getCommenterIdentityFromHeaders(headers: http.IncomingHttpHeaders) {
+  const cookies = parseCookies(headerValue(headers.cookie));
   return {
     id: cookies[commenterIdCookieName] || null,
     name: cookies[commenterNameCookieName] || null,
   };
+}
+
+function getCommenterIdentity(req: Request) {
+  return getCommenterIdentityFromHeaders(req.headers);
 }
 
 function getOrCreateCommenterId(req: Request, res: Response) {
@@ -1419,12 +1842,13 @@ function renderAuthPage(mode: "login" | "setup") {
 function renderAppShell(
   page: "list" | "editor" | "public",
   title: string,
-  data?: { noteId?: string; shareId?: string },
+  data?: { noteId?: string; shareId?: string; shareAccess?: string },
 ) {
   const attrs = [
     `data-page="${page}"`,
     data?.noteId ? `data-note-id="${escapeHtml(data.noteId)}"` : "",
     data?.shareId ? `data-share-id="${escapeHtml(data.shareId)}"` : "",
+    data?.shareAccess ? `data-share-access="${escapeHtml(data.shareAccess)}"` : "",
   ]
     .filter(Boolean)
     .join(" ");
