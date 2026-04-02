@@ -164,6 +164,7 @@ const instance = getInstance(instanceName);
 
 if (isShareInstance(instance)) {
   const sid = instance.shareId;
+  const plainArgs = args.filter((a) => !a.startsWith("--"));
   const nameArg = args.find((a) => a.startsWith("--name="));
   const agentName = nameArg ? nameArg.split("=").slice(1).join("=") : "Agent";
 
@@ -194,7 +195,7 @@ if (isShareInstance(instance)) {
     }
 
     case "edit": {
-      const editsJson = args[2];
+      const editsJson = plainArgs[2];
       if (!editsJson) {
         console.error("Usage: jot <instance> edit '<json edits>'");
         process.exit(1);
@@ -207,8 +208,8 @@ if (isShareInstance(instance)) {
     }
 
     case "comment": {
-      const quote = args[2];
-      const body = args.slice(3).join(" ");
+      const quote = plainArgs[2];
+      const body = plainArgs.slice(3).join(" ");
       if (!quote || !body) {
         console.error('Usage: jot <instance> comment <quote> <body>');
         process.exit(1);
@@ -219,8 +220,8 @@ if (isShareInstance(instance)) {
     }
 
     case "reply": {
-      const threadId = args[2];
-      const body = args.slice(3).join(" ");
+      const threadId = plainArgs[2];
+      const body = plainArgs.slice(3).join(" ");
       if (!threadId || !body) {
         console.error("Usage: jot <instance> reply <threadId> <body>");
         process.exit(1);
