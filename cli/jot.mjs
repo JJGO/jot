@@ -433,6 +433,29 @@ switch (subCommand) {
     break;
   }
 
+  case "share": {
+    const noteId = args[2];
+    const access = args[3];
+    if (!noteId) {
+      console.error("Usage: jot <instance> share <id> [none|view|comment|edit]");
+      process.exit(1);
+    }
+    if (!access) {
+      const payload = await request(instance, "GET", `/api/notes/${noteId}`);
+      const note = payload.note;
+      console.log(`${note.id}\t${note.shareAccess}\t${note.shareUrl}`);
+      break;
+    }
+    if (!["none", "view", "comment", "edit"].includes(access)) {
+      console.error("Access must be one of: none, view, comment, edit");
+      process.exit(1);
+    }
+    const sharePayload = await request(instance, "PUT", `/api/notes/${noteId}`, { shareAccess: access });
+    const readPayload = await request(instance, "GET", `/api/notes/${noteId}`);
+    console.log(`${noteId}\t${readPayload.note.shareAccess}\t${readPayload.note.shareUrl}`);
+    break;
+  }
+
   case "update": {
     const noteId = args[2];
     const field = args[3];
@@ -499,6 +522,7 @@ Owner commands:
   jot <instance> search <query>           Search notes
   jot <instance> read <id>                Read a note with comments
   jot <instance> create [title]           Create a new note
+  jot <instance> share <id> [access]      Get/set share access (none|view|comment|edit)
   jot <instance> comment <id> <quote> <b> Comment on quoted text
   jot <instance> reply <id> <tid> <mid> b  Reply to a specific message
   jot <instance> resolve <id> <tid>        Resolve a thread
