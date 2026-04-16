@@ -21,3 +21,7 @@ services:
       start_period: 10s
     volumes:
       - ./data:/app/data
+    # drop permissions
+    user: "1001:1001"
+    security_opt:
+      - no-new-privileges:true
