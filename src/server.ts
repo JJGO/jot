@@ -1865,6 +1865,17 @@ function revokeOwnerToken(token: string) {
   }
 }
 
+function decodeCookieValue(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    // Browsers may send unrelated cookies from the same domain with broken percent
+    // escapes. Falling back to the raw value keeps a single bad cookie from taking
+    // down every request.
+    return value;
+  }
+}
+
 function parseCookies(header: string | undefined) {
   const cookies: Record<string, string> = {};
   if (!header) {
@@ -1878,7 +1889,7 @@ function parseCookies(header: string | undefined) {
     }
     const key = item.slice(0, index).trim();
     const value = item.slice(index + 1).trim();
-    cookies[key] = decodeURIComponent(value);
+    cookies[key] = decodeCookieValue(value);
   }
 
   return cookies;
