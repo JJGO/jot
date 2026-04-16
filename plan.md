@@ -30,10 +30,7 @@ Important current files in this repo:
 - `cli/jot.mjs`
 - `README.md`
 - `Dockerfile`
-- `docker/docker-compose.base.yml`
-- `docker/docker-compose.prod.yml`
-- `docker/docker-compose.dev.yml`
-- `docker/control.sh`
+- `docker-compose.yml`
 
 ## External references to read fully before coding
 
@@ -427,7 +424,7 @@ Remote deploy target:
 
 Deploy command on server:
 ```bash
-ssh slayer "cd ~/jot && git pull && cd docker && bash control.sh start"
+ssh slayer "cd ~/jot && git pull && docker compose up -d --build"
 ```
 
 ## 16. Important instruction

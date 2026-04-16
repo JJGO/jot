@@ -37,9 +37,25 @@ jot serve --data=/var/jot    # custom data dir
 
 ## Docker
 
+Use the root `docker-compose.yml` for both local runs and deployments.
+
 ```bash
-cd docker
-bash control.sh start
+docker compose up --build -d
+```
+
+Open `http://localhost:3210`.
+
+Useful commands:
+
+```bash
+docker compose logs -f
+docker compose down
+```
+
+Optional overrides:
+
+```bash
+JOT_PORT=8080 docker compose up --build -d
 ```
 
 ## Sharing

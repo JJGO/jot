@@ -1,0 +1,18 @@
+services:
+  jot:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${JOT_PORT:-3210}:3210"
+    environment:
+      NODE_ENV: production
+      PORT: 3210
+      DATA_DIR: /app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3210/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - ./data:/app/data
