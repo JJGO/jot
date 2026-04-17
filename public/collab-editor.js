@@ -13,36 +13,12 @@ const PRESENCE_STALE_MS = 60000;
 
 function isWordChar(ch) { return /[0-9A-Za-z_]/.test(ch || ""); }
 
-function readInsertText(event) {
-  if (typeof event.data === "string") return event.data;
-  if (event.dataTransfer) return event.dataTransfer.getData("text/plain") || "";
-  return "";
-}
-
 function clampSel(text, sel) {
   return {
     start: Math.max(0, Math.min(sel.start, text.length)),
     end: Math.max(0, Math.min(sel.end, text.length)),
     direction: sel.direction || "none",
   };
-}
-
-function wordBackward(text, cursor) {
-  let i = cursor;
-  while (i > 0 && /\s/.test(text[i - 1])) i--;
-  while (i > 0 && !/\s/.test(text[i - 1])) i--;
-  return i;
-}
-function wordForward(text, cursor) {
-  let i = cursor;
-  while (i < text.length && /\s/.test(text[i])) i++;
-  while (i < text.length && !/\s/.test(text[i])) i++;
-  return i;
-}
-function lineBackward(text, cursor) {
-  let i = cursor - 1;
-  while (i > 0 && text[i - 1] !== "\n") i--;
-  return Math.max(0, i);
 }
 
 function buildDeleteMutation(state, start, endExcl, counter) {
@@ -181,7 +157,10 @@ export function createCollabEditor(textarea, opts) {
       start: textarea.selectionStart, end: textarea.selectionEnd, direction: textarea.selectionDirection || "none",
     });
     programmatic = true;
-    textarea.value = currentState.text;
+    // Avoid rewriting the textarea when the browser already applied the edit so native undo/redo survives.
+    if (textarea.value !== currentState.text) {
+      textarea.value = currentState.text;
+    }
     textarea.setSelectionRange(s.start, s.end, s.direction);
     queueMicrotask(() => { programmatic = false; });
     onTextChange?.(currentState.text);
@@ -326,72 +305,6 @@ export function createCollabEditor(textarea, opts) {
 
   // ---- Input handling ----
 
-  function handleBeforeInput(event) {
-    if (!initialized || !connected) { event.preventDefault(); return; }
-    if (event.isComposing || event.inputType.includes("Composition")) return;
-
-    const it = event.inputType;
-    const ss = textarea.selectionStart;
-    const se = textarea.selectionEnd;
-    const hasSel = ss !== se;
-    const mutations = [];
-    let ws2 = { text: currentState.text, idList: currentState.idList.clone() };
-
-    function pushDel(s, e) {
-      const m = buildDeleteMutation(ws2, s, e, nextClientCounter++);
-      if (!m) return false;
-      mutations.push(m); ws2 = applyClientMutation(ws2, m); return true;
-    }
-    function pushIns(i, c) {
-      const m = buildInsertMutation(ws2, i, c, nextClientCounter++, newId);
-      if (!m) return false;
-      mutations.push(m); ws2 = applyClientMutation(ws2, m); return true;
-    }
-
-    let sel = { start: ss, end: se, direction: "none" };
-
-    if (hasSel && it !== "historyUndo" && it !== "historyRedo") {
-      pushDel(ss, se); sel = { start: ss, end: ss, direction: "none" };
-    }
-
-    if (it === "insertText" || it === "insertReplacementText" || it === "insertFromPaste" || it === "insertFromDrop") {
-      const c = readInsertText(event); if (!c) return;
-      event.preventDefault();
-      pushIns(sel.start, c); sel = { start: sel.start + c.length, end: sel.start + c.length, direction: "none" };
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "insertLineBreak" || it === "insertParagraph") {
-      event.preventDefault();
-      pushIns(sel.start, "\n"); sel = { start: sel.start + 1, end: sel.start + 1, direction: "none" };
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "deleteContentBackward") {
-      event.preventDefault();
-      if (!hasSel && ss > 0) { pushDel(ss - 1, ss); sel = { start: ss - 1, end: ss - 1, direction: "none" }; }
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "deleteContentForward") {
-      event.preventDefault();
-      if (!hasSel && ss < currentState.text.length) { pushDel(ss, ss + 1); sel = { start: ss, end: ss, direction: "none" }; }
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "deleteWordBackward") {
-      event.preventDefault();
-      if (!hasSel && ss > 0) { const s = wordBackward(currentState.text, ss); pushDel(s, ss); sel = { start: s, end: s, direction: "none" }; }
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "deleteWordForward") {
-      event.preventDefault();
-      if (!hasSel && ss < currentState.text.length) { const e = wordForward(currentState.text, ss); pushDel(ss, e); sel = { start: ss, end: ss, direction: "none" }; }
-      applyLocalMutations(mutations, sel); return;
-    }
-    if (it === "deleteSoftLineBackward" || it === "deleteHardLineBackward") {
-      event.preventDefault();
-      if (!hasSel && ss > 0) { const s = lineBackward(currentState.text, ss); pushDel(s, ss); sel = { start: s, end: s, direction: "none" }; }
-      applyLocalMutations(mutations, sel); return;
-    }
-  }
-
   function handleInput() {
     if (programmatic || !initialized) return;
     applyDiffFallback(textarea.value);
@@ -410,10 +323,23 @@ export function createCollabEditor(textarea, opts) {
     const dm = buildDeleteMutation(ws2, prefix, ps, nextClientCounter);
     if (dm) { nextClientCounter++; mutations.push(dm); ws2 = applyClientMutation(ws2, dm); }
     const ins = nextText.slice(prefix, ns);
-    if (ins) { const im = buildInsertMutation(ws2, prefix, ins, nextClientCounter, newId); if (im) { nextClientCounter++; mutations.push(im); } }
-    if (!mutations.length) { render({ start: prefix, end: prefix, direction: "none" }); return; }
-    const cursor = prefix + ins.length;
-    applyLocalMutations(mutations, { start: cursor, end: cursor, direction: "none" });
+    if (ins) {
+      const im = buildInsertMutation(ws2, prefix, ins, nextClientCounter, newId);
+      if (im) {
+        nextClientCounter++;
+        mutations.push(im);
+      }
+    }
+    const selection = clampSel(nextText, {
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+      direction: textarea.selectionDirection || "none",
+    });
+    if (!mutations.length) {
+      render(selection);
+      return;
+    }
+    applyLocalMutations(mutations, selection);
   }
 
   // ---- WebSocket ----
@@ -444,7 +370,6 @@ export function createCollabEditor(textarea, opts) {
 
   // ---- Event listeners ----
 
-  textarea.addEventListener("beforeinput", handleBeforeInput);
   textarea.addEventListener("input", handleInput);
   textarea.addEventListener("compositionend", () => { if (textarea.value !== currentState.text) applyDiffFallback(textarea.value); });
   document.addEventListener("selectionchange", () => { if (document.activeElement === textarea) throttledPresence(); });
@@ -457,7 +382,6 @@ export function createCollabEditor(textarea, opts) {
   return {
     destroy() {
       destroyed = true;
-      textarea.removeEventListener("beforeinput", handleBeforeInput);
       textarea.removeEventListener("input", handleInput);
       if (resizeObserver) resizeObserver.disconnect();
       if (ws) ws.close();
