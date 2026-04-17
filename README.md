@@ -23,6 +23,7 @@ Open `http://localhost:3210`. Set the owner password on first visit.
 - CLI for humans and agents (owner API keys or share links)
 - Agent setup modal with copy-paste instructions
 - Dark and light theme
+- MathJax rendering for inline and display math
 - Mobile support
 - `.md` files on disk (derived from collaborative state)
 

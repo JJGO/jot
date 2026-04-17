@@ -168,6 +168,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use("/static", express.static(publicDir));
 app.use("/static/mermaid", express.static(path.join(path.resolve(__dirname, ".."), "node_modules", "mermaid", "dist")));
+app.use("/static/mathjax", express.static(path.join(path.resolve(__dirname, ".."), "node_modules", "mathjax")));
 
 app.get("/health", (_req, res) => {
   res.type("text/plain").send("ok");
@@ -1697,8 +1698,70 @@ function sanitizeAnchor(input: unknown) {
   return { quote, prefix, suffix, start, end } satisfies CommentAnchor;
 }
 
+type MathPlaceholder = {
+  token: string;
+  source: string;
+};
+
+function isEscapedDelimiter(source: string, index: number) {
+  let backslashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) {
+    backslashCount += 1;
+  }
+  return backslashCount % 2 === 1;
+}
+
+function preserveMathJaxDelimiters(markdown: string) {
+  const placeholders: MathPlaceholder[] = [];
+  let output = "";
+
+  for (let index = 0; index < markdown.length; ) {
+    const opening = markdown.startsWith("\\(", index) && !isEscapedDelimiter(markdown, index)
+      ? "\\("
+      : markdown.startsWith("\\[", index) && !isEscapedDelimiter(markdown, index)
+        ? "\\["
+        : null;
+
+    if (!opening) {
+      output += markdown[index];
+      index += 1;
+      continue;
+    }
+
+    const closing = opening === "\\(" ? "\\)" : "\\]";
+    let end = index + opening.length;
+
+    while (end < markdown.length) {
+      if (markdown.startsWith(closing, end) && !isEscapedDelimiter(markdown, end)) {
+        const token = `JOTMATHPLACEHOLDER${placeholders.length}TOKEN`;
+        placeholders.push({ token, source: markdown.slice(index, end + closing.length) });
+        output += token;
+        index = end + closing.length;
+        break;
+      }
+      end += 1;
+    }
+
+    if (end >= markdown.length) {
+      output += markdown[index];
+      index += 1;
+    }
+  }
+
+  return { markdown: output, placeholders };
+}
+
+function restoreMathJaxDelimiters(html: string, placeholders: MathPlaceholder[]) {
+  let restored = html;
+  for (const placeholder of placeholders) {
+    restored = restored.replaceAll(placeholder.token, escapeHtml(placeholder.source));
+  }
+  return restored;
+}
+
 function renderMarkdown(markdown: string) {
-  const rawHtml = marked.parse(markdown) as string;
+  const preserved = preserveMathJaxDelimiters(markdown);
+  const rawHtml = restoreMathJaxDelimiters(marked.parse(preserved.markdown) as string, preserved.placeholders);
   return sanitizeHtml(rawHtml, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
       "img",
@@ -2195,6 +2258,20 @@ function renderAppShell(
     <script src="/static/components.js"></script>${
       page !== "list"
         ? `
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [["$", "$"], ["\\(", "\\)"]],
+          displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+          processEscapes: true,
+          processEnvironments: true,
+        },
+        options: {
+          skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+        },
+      };
+    </script>
+    <script defer src="/static/mathjax/tex-chtml.js"></script>
     <script type="module">
       import mermaid from "/static/mermaid/mermaid.esm.min.mjs";
       mermaid.initialize({ startOnLoad: false, theme: document.documentElement.getAttribute("data-theme") === "light" ? "default" : "dark" });

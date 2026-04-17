@@ -320,6 +320,10 @@ input:focus, textarea:focus { border-color: var(--muted); }
 .markdown-body a { color: var(--blue); }
 .markdown-body img { max-width: 100%; height: auto; }
 
+/* MathJax */
+.markdown-body mjx-container { max-width: 100%; overflow-wrap: normal; word-wrap: normal; word-break: normal; }
+.markdown-body mjx-container[display="true"] { display: block; margin: 0 0 1rem; overflow-x: auto; overflow-y: hidden; padding-bottom: 0.15rem; }
+
 /* Mermaid diagrams */
 .mermaid-wrap { position: relative; margin: 0 0 1rem; overflow: hidden; border: 1px solid var(--code-border); border-radius: 14px; background: var(--code-bg); user-select: none; }
 .mermaid-viewport { overflow: hidden; }

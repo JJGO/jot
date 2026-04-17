@@ -19,6 +19,8 @@
 
   let mermaidIdCounter = 0;
   let mermaidCache = [];
+  let previewEnhancementToken = 0;
+  let previewEnhancementQueue = Promise.resolve();
   const svgBtn = (action, d) => `<button type="button" data-action="${action}"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${d}</svg></button>`;
   const mermaidToolbarHtml = ''
     + '<span></span>' + svgBtn('up', '<path d="M4 10l4-4 4 4"/>') + svgBtn('zoom-in', '<circle cx="8" cy="8" r="5.5"/><path d="M8 5.5v5M5.5 8h5"/>')
@@ -85,10 +87,44 @@
   window.__renderMermaid = renderMermaid;
   window.__clearMermaidCache = () => { mermaidCache = []; };
 
+  function previewContainsMath(container) {
+    return /\\\(|\\\[|\$\$|(^|[^\\])\$(?!\s)/m.test(container?.textContent || "");
+  }
+
+  async function renderMathJax(container) {
+    const mathJax = window.MathJax;
+    if (!container || !mathJax?.startup?.promise || !previewContainsMath(container)) return;
+    try {
+      await mathJax.startup.promise;
+      await mathJax.typesetPromise?.([container]);
+    } catch (error) {
+      console.error("Failed to render math", error);
+    }
+  }
+
   function setPreviewHtml(refs, html) {
     if (!refs.previewContent) return;
+    try { window.MathJax?.typesetClear?.([refs.previewContent]); } catch {}
     refs.previewContent.innerHTML = html;
-    renderMermaid(refs.previewContent);
+    const token = ++previewEnhancementToken;
+
+    // Queue preview enhancements so rapid typing doesn't start overlapping async render passes.
+    previewEnhancementQueue = previewEnhancementQueue
+      .catch(() => {})
+      .then(async () => {
+        if (token !== previewEnhancementToken || !refs.previewContent?.isConnected) return;
+        await renderMermaid(refs.previewContent);
+        if (token !== previewEnhancementToken || !refs.previewContent?.isConnected) return;
+        await renderMathJax(refs.previewContent);
+      })
+      .catch((error) => {
+        console.error("Preview enhancement failed", error);
+      })
+      .finally(() => {
+        if (token === previewEnhancementToken && refs.previewContent?.isConnected) {
+          syncThreadLayout(refs);
+        }
+      });
   }
 
   const shareAccess = document.body.dataset.shareAccess || "";
