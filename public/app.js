@@ -16,6 +16,9 @@
     ? window.__getThemePreference()
     : (document.documentElement.getAttribute("data-theme-preference") || document.documentElement.getAttribute("data-theme") || "system");
   const themeIcon = window.__themeIcon || ((preference) => preference === "light" ? "☀" : preference === "dark" ? "☾" : "◐");
+  const commentLayoutStorageKey = "jot.commentLayout";
+  const publicSideCommentsMinWidth = 1200;
+  const editorSideCommentsMinWidth = 1520;
 
   let mermaidIdCounter = 0;
   let mermaidCache = [];
@@ -148,6 +151,7 @@
     saveStatus: "Saved",
     showResolved: false,
     showComments: true,
+    commentLayoutPreference: loadCommentLayoutPreference(),
     modalOpen: false,
   };
 
@@ -352,6 +356,8 @@
     const isPublicView = isPublic && shareAccess === "view";
     app.innerHTML = isPublicEdit ? renderPublicEditorLayout() : isPublic ? renderPublicLayout(isPublicView) : renderEditorLayout();
 
+    const workspace = document.querySelector(".workspace");
+    const previewStage = document.getElementById("previewStage");
     const previewScroll = document.getElementById("previewScroll");
     const previewCanvas = document.getElementById("previewCanvas");
     const previewContent = document.getElementById("previewContent");
@@ -373,8 +379,15 @@
     const commentFab = document.getElementById("commentFab");
     const previewFab = document.getElementById("previewFab");
     const previewCloseButton = document.getElementById("previewCloseButton");
+    const commentLayoutButton = document.getElementById("commentLayoutButton");
+
+    if (state.commentLayoutPreference == null) {
+      state.commentLayoutPreference = getDefaultCommentLayoutPreference({ isPublic, isPublicEdit, isPublicView });
+    }
 
     const refs = {
+      workspace,
+      previewStage,
       previewScroll,
       previewCanvas,
       previewContent,
@@ -390,6 +403,7 @@
       newNoteButton,
       resolvedButton,
       commentsButton,
+      commentLayoutButton,
       logoutButton,
       saveStatus,
       commenterLabel,
@@ -436,6 +450,15 @@
         state.showComments = !state.showComments;
         updateCommentsButton(commentsButton);
         updateResolvedButton(resolvedButton);
+        syncThreadLayout(refs);
+      });
+    }
+
+    if (commentLayoutButton) {
+      commentLayoutButton.addEventListener("click", () => {
+        const nextLayout = getEffectiveCommentLayout(refs) === "side" ? "popup" : "side";
+        state.commentLayoutPreference = nextLayout;
+        saveCommentLayoutPreference(nextLayout);
         syncThreadLayout(refs);
       });
     }
@@ -525,7 +548,10 @@
     }
 
     if (previewScroll) previewScroll.addEventListener("scroll", () => scheduleLayout(refs));
-    window.addEventListener("resize", () => scheduleLayout(refs));
+    window.addEventListener("resize", () => {
+      scheduleLayout(refs);
+      refreshOpenThreadDialog(refs, isPublic);
+    });
 
     document.addEventListener("selectionchange", () => {
       if (state.page === "list" || state.modalOpen) {
@@ -588,8 +614,7 @@
       if (!threadId) {
         return;
       }
-      const railVisible = threadRail && threadRail.offsetParent !== null;
-      if (railVisible) {
+      if (getEffectiveCommentLayout(refs) === "side") {
         activateThread(threadId, refs, true);
       } else {
         openThreadDialog(threadId, refs, isPublic);
@@ -838,6 +863,7 @@
             <div class="preview-controls" id="previewControls">
               <jot-button variant="ghost" size="sm" id="commentsButton">hide comments</jot-button>
               <jot-button variant="ghost" size="sm" id="resolvedButton">resolved</jot-button>
+              ${renderCommentLayoutControl()}
             </div>
             <div class="preview-scroll" id="previewScroll">
               <div class="preview-canvas" id="previewCanvas">
@@ -858,7 +884,8 @@
   function renderPublicLayout(viewOnly) {
     const commentControls = viewOnly ? "" : `
             <jot-button variant="ghost" size="sm" id="commentsButton">hide comments</jot-button>
-            <jot-button variant="ghost" size="sm" id="resolvedButton">resolved</jot-button>`;
+            <jot-button variant="ghost" size="sm" id="resolvedButton">resolved</jot-button>
+            ${renderCommentLayoutControl()}`;
     const commentElements = viewOnly ? "" : `
               <div class="highlight-layer" id="highlightLayer"></div>
               <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
@@ -895,6 +922,10 @@
     `;
   }
 
+  function renderCommentLayoutControl() {
+    return `<jot-button variant="ghost" size="sm" id="commentLayoutButton">sidebar</jot-button>`;
+  }
+
   function renderPublicEditorLayout() {
     return `
       <div class="app-root">
@@ -922,6 +953,7 @@
             <div class="preview-controls" id="previewControls">
               <jot-button variant="ghost" size="sm" id="commentsButton">hide comments</jot-button>
               <jot-button variant="ghost" size="sm" id="resolvedButton">resolved</jot-button>
+              ${renderCommentLayoutControl()}
             </div>
             <div class="preview-scroll" id="previewScroll">
               <div class="preview-canvas" id="previewCanvas">
@@ -1103,6 +1135,49 @@
     });
   }
 
+  function loadCommentLayoutPreference() {
+    try {
+      const value = window.localStorage.getItem(commentLayoutStorageKey);
+      return value === "popup" || value === "side" ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveCommentLayoutPreference(layout) {
+    try {
+      window.localStorage.setItem(commentLayoutStorageKey, layout);
+    } catch {}
+  }
+
+  function getDefaultCommentLayoutPreference({ isPublic, isPublicEdit, isPublicView }) {
+    if (isPublic && !isPublicEdit && !isPublicView) {
+      return "side";
+    }
+    return "popup";
+  }
+
+  function canUseSideComments(refs) {
+    if (!refs.previewStage || !refs.threadRail || isMobileDevice) {
+      return false;
+    }
+    const minWidth = refs.workspace ? editorSideCommentsMinWidth : publicSideCommentsMinWidth;
+    return window.innerWidth >= minWidth;
+  }
+
+  function getEffectiveCommentLayout(refs) {
+    if (!state.showComments) {
+      return "popup";
+    }
+    return state.commentLayoutPreference === "side" && canUseSideComments(refs) ? "side" : "popup";
+  }
+
+  function applyCommentLayoutClasses(refs) {
+    const sideLayout = getEffectiveCommentLayout(refs) === "side";
+    refs.previewStage?.classList.toggle("preview-stage--side-comments", sideLayout);
+    refs.workspace?.classList.toggle("workspace--side-comments", sideLayout);
+  }
+
   function setButtonLabel(el, text) {
     if (!el) return;
     const btn = el.querySelector("button") || el;
@@ -1119,6 +1194,16 @@
     setButtonLabel(button, state.showComments ? "hide comments" : "show comments");
   }
 
+  function updateCommentLayoutButton(button, refs) {
+    if (!button) return;
+    const canSide = canUseSideComments(refs);
+    button.style.display = state.showComments && canSide ? "" : "none";
+    if (!canSide) {
+      return;
+    }
+    setButtonLabel(button, getEffectiveCommentLayout(refs) === "side" ? "popup" : "sidebar");
+  }
+
   function scheduleLayout(refs) {
     cancelAnimationFrame(state.layoutFrame);
     state.layoutFrame = requestAnimationFrame(() => syncThreadLayout(refs));
@@ -1128,6 +1213,9 @@
     if (!refs.previewContent || !refs.threadRail || !refs.highlightLayer) {
       return;
     }
+
+    applyCommentLayoutClasses(refs);
+    updateCommentLayoutButton(refs.commentLayoutButton, refs);
 
     state.visibleMatches.clear();
     refs.highlightLayer.innerHTML = "";
@@ -1141,6 +1229,7 @@
       return;
     }
 
+    const effectiveLayout = getEffectiveCommentLayout(refs);
     const canvasRect = refs.previewCanvas.getBoundingClientRect();
     const visible = [];
 
@@ -1176,7 +1265,7 @@
       state.visibleMatches.set(thread.id, match);
     }
 
-    if (!visible.length) {
+    if (!visible.length || effectiveLayout !== "side") {
       refs.threadRail.innerHTML = "";
       return;
     }
@@ -1400,7 +1489,7 @@
 
     const isEdit = options.mode === "edit";
     const isReply = options.mode === "reply";
-    const reopenThreadId = (window.innerWidth <= 980) ? options.threadId : null;
+    const reopenThreadId = getEffectiveCommentLayout(refs) === "popup" ? options.threadId : null;
     const onCancel = reopenThreadId ? () => {
       const stillExists = state.threads.find((item) => item.id === reopenThreadId);
       if (stillExists) {
@@ -1616,6 +1705,11 @@
     if (!state.modalOpen || !state.activeThreadId) return;
     const body = refs.modalBackdrop?.querySelector(".thread-modal-body");
     if (!body) return;
+    if (getEffectiveCommentLayout(refs) === "side") {
+      closeModal(refs);
+      syncThreadLayout(refs);
+      return;
+    }
     const thread = state.threads.find((item) => item.id === state.activeThreadId);
     if (!thread) {
       closeModal(refs);

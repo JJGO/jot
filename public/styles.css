@@ -260,7 +260,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
 .icon-action.copy-success { color: var(--green); }
 
 .workspace {
-  display: grid; grid-template-columns: 1fr 1fr;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   height: calc(100vh - var(--toolbar-height)); overflow: hidden;
 }
 .editor-pane {
@@ -413,7 +413,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
 }
 .comment-fab:hover { background: var(--fab-hover); }
 
-/* --- Thread rail: hidden by default, shown only on public desktop wide --- */
+/* --- Thread rail: hidden by default, activated by layout classes on wide screens --- */
 .thread-rail {
   position: absolute; top: 0; right: 0; width: var(--thread-width);
   min-height: 100%; padding: 2.5rem 0.55rem 1.25rem 0; display: none;
@@ -484,10 +484,19 @@ input:focus, textarea:focus { border-color: var(--muted); }
 .inline-error { color: var(--danger); margin-top: 0.65rem; }
 .public-page-topbar .topbar-title-subtle { color: var(--muted); font-size: 0.95rem; }
 
-/* --- Wide public desktop: show rail --- */
+/* --- Wide public desktop: show rail when sidebar mode is active --- */
 @media (min-width: 1200px) {
-  .preview-stage.public .thread-rail { display: block; }
-  .preview-stage.public .preview-canvas { padding-right: calc(var(--thread-width) + 20px); }
+  .preview-stage.public.preview-stage--side-comments .thread-rail { display: block; }
+  .preview-stage.public.preview-stage--side-comments .preview-canvas { padding-right: calc(var(--thread-width) + 20px); }
+}
+
+/* --- Wide editor desktop: rebalance split view when sidebar mode is active --- */
+@media (min-width: 1520px) {
+  .workspace.workspace--side-comments { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); }
+  .workspace.workspace--side-comments .preview-stage.preview-stage--side-comments .thread-rail { display: block; }
+  .workspace.workspace--side-comments .preview-stage.preview-stage--side-comments .preview-canvas {
+    padding-right: calc(var(--thread-width) + 20px);
+  }
 }
 
 /* --- Preview button (editor narrow only, in topbar) --- */
