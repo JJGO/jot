@@ -2175,7 +2175,7 @@ function renderSimplePage(title: string, body: string) {
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <title>${escapeHtml(title)}</title>
     <link rel="stylesheet" href="/static/styles.css" />
@@ -2199,7 +2199,7 @@ function renderAuthPage(mode: "login" | "setup") {
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <title>${title}</title>
     <link rel="stylesheet" href="/static/styles.css" />
@@ -2247,7 +2247,7 @@ function renderAppShell(
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <title>${escapeHtml(title)}</title>
     <link rel="stylesheet" href="/static/styles.css" />

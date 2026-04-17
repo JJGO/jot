@@ -19,11 +19,29 @@
   const commentLayoutStorageKey = "jot.commentLayout";
   const publicSideCommentsMinWidth = 1200;
   const editorSideCommentsMinWidth = 1520;
+  const viewportBottomInsetVar = "--jot-visual-viewport-bottom-inset";
 
   let mermaidIdCounter = 0;
   let mermaidCache = [];
   let previewEnhancementToken = 0;
   let previewEnhancementQueue = Promise.resolve();
+
+  function syncViewportBottomInset() {
+    if (!isMobileDevice || !window.visualViewport) {
+      document.documentElement.style.setProperty(viewportBottomInsetVar, "0px");
+      return;
+    }
+
+    const visibleBottom = window.visualViewport.height + window.visualViewport.offsetTop;
+    const bottomInset = Math.max(0, window.innerHeight - visibleBottom);
+    document.documentElement.style.setProperty(viewportBottomInsetVar, `${Math.round(bottomInset)}px`);
+  }
+
+  syncViewportBottomInset();
+  window.addEventListener("resize", syncViewportBottomInset);
+  window.addEventListener("orientationchange", syncViewportBottomInset);
+  window.visualViewport?.addEventListener("resize", syncViewportBottomInset);
+  window.visualViewport?.addEventListener("scroll", syncViewportBottomInset);
   const svgBtn = (action, d) => `<button type="button" data-action="${action}"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${d}</svg></button>`;
   const mermaidToolbarHtml = ''
     + '<span></span>' + svgBtn('up', '<path d="M4 10l4-4 4 4"/>') + svgBtn('zoom-in', '<circle cx="8" cy="8" r="5.5"/><path d="M8 5.5v5M5.5 8h5"/>')

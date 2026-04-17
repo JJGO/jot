@@ -42,6 +42,7 @@
   --hljs-comment: #7a7a7a;
   --hljs-number: #ff8a65;
   --hljs-type: #7cc7ff;
+  --jot-visual-viewport-bottom-inset: 0px;
 }
 
 [data-theme="light"] {
@@ -416,7 +417,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
   position: fixed;
   left: 1rem;
   right: 1rem;
-  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  bottom: calc(1rem + max(env(safe-area-inset-bottom, 0px), var(--jot-visual-viewport-bottom-inset)));
   min-height: 48px;
   padding: 0.8rem 1rem;
   border-radius: 14px;
