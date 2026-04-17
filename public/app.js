@@ -94,6 +94,113 @@
     return /\\\(|\\\[|\$\$|(^|[^\\])\$(?!\s)/m.test(container?.textContent || "");
   }
 
+  function isEscapedMathDelimiter(source, index) {
+    let backslashCount = 0;
+    for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) {
+      backslashCount += 1;
+    }
+    return backslashCount % 2 === 1;
+  }
+
+  function findClosingMathDelimiter(source, start, delimiter) {
+    for (let index = start; index < source.length; index += 1) {
+      if (!source.startsWith(delimiter, index) || isEscapedMathDelimiter(source, index)) {
+        continue;
+      }
+      return index;
+    }
+    return -1;
+  }
+
+  function findMathRanges(source) {
+    const ranges = [];
+
+    for (let index = 0; index < source.length; ) {
+      const delimiter = source.startsWith("\\[", index) && !isEscapedMathDelimiter(source, index)
+        ? { open: "\\[", close: "\\]", display: true }
+        : source.startsWith("\\(", index) && !isEscapedMathDelimiter(source, index)
+          ? { open: "\\(", close: "\\)", display: false }
+          : source.startsWith("$$", index) && !isEscapedMathDelimiter(source, index)
+            ? { open: "$$", close: "$$", display: true }
+            : source[index] === "$" && !source.startsWith("$$", index) && !isEscapedMathDelimiter(source, index)
+              ? { open: "$", close: "$", display: false }
+              : null;
+
+      if (!delimiter) {
+        index += 1;
+        continue;
+      }
+
+      const end = findClosingMathDelimiter(source, index + delimiter.open.length, delimiter.close);
+      if (end === -1) {
+        index += delimiter.open.length;
+        continue;
+      }
+
+      ranges.push({
+        start: index,
+        end: end + delimiter.close.length,
+        source: source.slice(index, end + delimiter.close.length),
+        display: delimiter.display,
+      });
+      index = end + delimiter.close.length;
+    }
+
+    return ranges;
+  }
+
+  function wrapMathSourceNodes(container) {
+    if (!container || !previewContainsMath(container)) return;
+
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !/[\\$]/.test(node.nodeValue)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (node.parentElement?.closest("pre, code, .mermaid-wrap, [data-jot-math-source]")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    const candidates = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      candidates.push(node);
+    }
+
+    for (const textNode of candidates) {
+      const value = textNode.nodeValue || "";
+      const ranges = findMathRanges(value);
+      if (!ranges.length) {
+        continue;
+      }
+
+      const fragment = document.createDocumentFragment();
+      let cursor = 0;
+
+      for (const range of ranges) {
+        if (range.start > cursor) {
+          fragment.appendChild(document.createTextNode(value.slice(cursor, range.start)));
+        }
+
+        const wrapper = document.createElement("span");
+        wrapper.className = `jot-math-source${range.display ? " jot-math-source--display" : ""}`;
+        wrapper.dataset.jotMathSource = range.source;
+        wrapper.textContent = range.source;
+        fragment.appendChild(wrapper);
+        cursor = range.end;
+      }
+
+      if (cursor < value.length) {
+        fragment.appendChild(document.createTextNode(value.slice(cursor)));
+      }
+
+      textNode.replaceWith(fragment);
+    }
+  }
+
   async function renderMathJax(container) {
     if (!container || !previewContainsMath(container)) return;
 
@@ -117,6 +224,8 @@
     previewEnhancementQueue = previewEnhancementQueue
       .catch(() => {})
       .then(async () => {
+        if (token !== previewEnhancementToken || !refs.previewContent?.isConnected) return;
+        wrapMathSourceNodes(refs.previewContent);
         if (token !== previewEnhancementToken || !refs.previewContent?.isConnected) return;
         await renderMermaid(refs.previewContent);
         if (token !== previewEnhancementToken || !refs.previewContent?.isConnected) return;
@@ -1860,8 +1969,8 @@
 
   function buildAnchorFromSelection(root, range) {
     const mapping = collectTextNodes(root);
-    const start = resolveOffset(root, mapping, range.startContainer, range.startOffset);
-    const end = resolveOffset(root, mapping, range.endContainer, range.endOffset);
+    const start = resolveOffset(mapping, range.startContainer, range.startOffset, true);
+    const end = resolveOffset(mapping, range.endContainer, range.endOffset, false);
     if (start == null || end == null || end <= start) {
       return null;
     }
@@ -1878,8 +1987,7 @@
     };
   }
 
-  function locateAnchor(anchor, root) {
-    const mapping = collectTextNodes(root);
+  function locateAnchorInMapping(anchor, mapping) {
     if (!mapping.fullText || !anchor.quote) {
       return null;
     }
@@ -1933,7 +2041,18 @@
     return { range, start: best, end: best + anchor.quote.length };
   }
 
-  function collectTextNodes(root) {
+  function locateAnchor(anchor, root) {
+    const sourceMapping = collectTextNodes(root);
+    const sourceMatch = locateAnchorInMapping(anchor, sourceMapping);
+    if (sourceMatch) {
+      return sourceMatch;
+    }
+
+    // Older math comments were anchored against MathJax's rendered unicode text.
+    return locateAnchorInMapping(anchor, collectTextNodes(root, { preserveMathSource: false }));
+  }
+
+  function collectRenderedTextNodes(root) {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) { return node.parentElement?.closest(".mermaid-wrap") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; },
     });
@@ -1944,7 +2063,7 @@
 
     while ((node = walker.nextNode())) {
       const value = node.nodeValue || "";
-      segments.push({ node, start: offset, end: offset + value.length });
+      segments.push({ type: "text", node, start: offset, end: offset + value.length });
       fullText += value;
       offset += value.length;
     }
@@ -1952,28 +2071,157 @@
     return { fullText, segments };
   }
 
-  function resolveOffset(root, mapping, container, localOffset) {
-    if (container.nodeType === Node.TEXT_NODE) {
-      const segment = mapping.segments.find((item) => item.node === container);
-      return segment ? segment.start + localOffset : null;
+  function collectAnchorTextNodes(root) {
+    const segments = [];
+    let offset = 0;
+    let fullText = "";
+
+    function pushSegment(segment) {
+      segments.push({ ...segment, start: offset, end: offset + segment.text.length });
+      fullText += segment.text;
+      offset += segment.text.length;
     }
 
+    function visit(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const value = node.nodeValue || "";
+        if (!value || node.parentElement?.closest(".mermaid-wrap, [data-jot-math-source]")) {
+          return;
+        }
+        pushSegment({ type: "text", node, text: value });
+        return;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return;
+      }
+
+      const element = node;
+      if (element.classList.contains("mermaid-wrap") || element.tagName === "MJX-ASSISTIVE-MML") {
+        return;
+      }
+
+      if (element.dataset.jotMathSource != null) {
+        pushSegment({ type: "math", element, text: element.dataset.jotMathSource });
+        return;
+      }
+
+      for (const child of element.childNodes) {
+        visit(child);
+      }
+    }
+
+    visit(root);
+    return { fullText, segments };
+  }
+
+  function collectTextNodes(root, options = {}) {
+    return options.preserveMathSource === false ? collectRenderedTextNodes(root) : collectAnchorTextNodes(root);
+  }
+
+  function comparePointToSegment(segment, container, localOffset) {
     const range = document.createRange();
-    range.selectNodeContents(root);
-    range.setEnd(container, localOffset);
-    return range.toString().length;
+    if (segment.type === "math") {
+      range.selectNode(segment.element);
+    } else {
+      range.selectNodeContents(segment.node);
+    }
+    return range.comparePoint(container, localOffset);
+  }
+
+  function resolveOffset(mapping, container, localOffset, isStart) {
+    if (!mapping.segments.length) {
+      return 0;
+    }
+
+    for (const segment of mapping.segments) {
+      if (segment.type === "text" && segment.node === container) {
+        return segment.start + Math.min(localOffset, segment.end - segment.start);
+      }
+
+      const relation = comparePointToSegment(segment, container, localOffset);
+      if (relation === 1) {
+        continue;
+      }
+      if (relation === 0) {
+        return segment.type === "math" ? (isStart ? segment.start : segment.end) : segment.start;
+      }
+      return segment.start;
+    }
+
+    return mapping.segments[mapping.segments.length - 1].end;
+  }
+
+  function offsetToDomPoint(mapping, offset, isEnd) {
+    if (!mapping.segments.length) {
+      return null;
+    }
+
+    for (const segment of mapping.segments) {
+      if (offset > segment.end) {
+        continue;
+      }
+
+      if (segment.type === "text") {
+        return {
+          type: "text",
+          node: segment.node,
+          offset: Math.max(0, Math.min(segment.end - segment.start, offset - segment.start)),
+        };
+      }
+
+      if (offset <= segment.start) {
+        return { type: "before", element: segment.element };
+      }
+      if (offset >= segment.end) {
+        return { type: "after", element: segment.element };
+      }
+      return { type: isEnd ? "after" : "before", element: segment.element };
+    }
+
+    const lastSegment = mapping.segments[mapping.segments.length - 1];
+    if (lastSegment.type === "text") {
+      return { type: "text", node: lastSegment.node, offset: lastSegment.end - lastSegment.start };
+    }
+    return { type: "after", element: lastSegment.element };
+  }
+
+  function applyRangeBoundary(range, boundary, isEnd) {
+    if (boundary.type === "text") {
+      if (isEnd) {
+        range.setEnd(boundary.node, boundary.offset);
+      } else {
+        range.setStart(boundary.node, boundary.offset);
+      }
+      return;
+    }
+
+    if (boundary.type === "before") {
+      if (isEnd) {
+        range.setEndBefore(boundary.element);
+      } else {
+        range.setStartBefore(boundary.element);
+      }
+      return;
+    }
+
+    if (isEnd) {
+      range.setEndAfter(boundary.element);
+    } else {
+      range.setStartAfter(boundary.element);
+    }
   }
 
   function offsetsToRange(mapping, start, end) {
-    const startSegment = mapping.segments.find((segment) => start >= segment.start && start <= segment.end);
-    const endSegment = mapping.segments.find((segment) => end >= segment.start && end <= segment.end);
-    if (!startSegment || !endSegment) {
+    const startBoundary = offsetToDomPoint(mapping, start, false);
+    const endBoundary = offsetToDomPoint(mapping, end, true);
+    if (!startBoundary || !endBoundary) {
       return null;
     }
 
     const range = document.createRange();
-    range.setStart(startSegment.node, start - startSegment.start);
-    range.setEnd(endSegment.node, end - endSegment.start);
+    applyRangeBoundary(range, startBoundary, false);
+    applyRangeBoundary(range, endBoundary, true);
     return range;
   }
 
