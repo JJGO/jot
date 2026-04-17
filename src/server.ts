@@ -169,6 +169,7 @@ app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use("/static", express.static(publicDir));
 app.use("/static/mermaid", express.static(path.join(path.resolve(__dirname, ".."), "node_modules", "mermaid", "dist")));
 app.use("/static/mathjax", express.static(path.join(path.resolve(__dirname, ".."), "node_modules", "mathjax")));
+app.use("/static/mathjax-fonts", express.static(path.join(path.resolve(__dirname, ".."), "node_modules", "@mathjax", "mathjax-newcm-font")));
 
 app.get("/health", (_req, res) => {
   res.type("text/plain").send("ok");
@@ -2259,6 +2260,9 @@ function renderAppShell(
       page !== "list"
         ? `
     <script>
+      window.__jotMathJaxReady = new Promise((resolve) => {
+        window.__resolveJotMathJaxReady = resolve;
+      });
       window.MathJax = {
         tex: {
           inlineMath: [["$", "$"], ["\\(", "\\)"]],
@@ -2266,12 +2270,24 @@ function renderAppShell(
           processEscapes: true,
           processEnvironments: true,
         },
+        chtml: {
+          matchFontHeight: false,
+          fontURL: "/static/mathjax-fonts/chtml/woff2",
+          dynamicPrefix: "/static/mathjax-fonts/chtml/dynamic",
+        },
+        startup: {
+          typeset: false,
+          ready() {
+            MathJax.startup.defaultReady();
+            window.__resolveJotMathJaxReady?.(MathJax);
+          },
+        },
         options: {
           skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
         },
       };
     </script>
-    <script defer src="/static/mathjax/tex-chtml.js"></script>
+    <script defer src="/static/mathjax/tex-chtml.js" onerror="console.error('Failed to load MathJax'); window.__resolveJotMathJaxReady?.(null)"></script>
     <script type="module">
       import mermaid from "/static/mermaid/mermaid.esm.min.mjs";
       mermaid.initialize({ startOnLoad: false, theme: document.documentElement.getAttribute("data-theme") === "light" ? "default" : "dark" });

@@ -95,9 +95,11 @@
   }
 
   async function renderMathJax(container) {
-    const mathJax = window.MathJax;
-    if (!container || !mathJax?.startup?.promise || !previewContainsMath(container)) return;
+    if (!container || !previewContainsMath(container)) return;
+
     try {
+      const mathJax = await window.__jotMathJaxReady;
+      if (!mathJax?.startup?.promise) return;
       await mathJax.startup.promise;
       await mathJax.typesetPromise?.([container]);
     } catch (error) {
