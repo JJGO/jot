@@ -264,6 +264,8 @@
     showComments: true,
     commentLayoutPreference: loadCommentLayoutPreference(),
     modalOpen: false,
+    selectionRefreshTimer: null,
+    selectionRefreshFollowupTimer: null,
   };
 
   if (page === "list") {
@@ -668,9 +670,15 @@
       if (state.page === "list" || state.modalOpen) {
         return;
       }
-      updateSelectionBubble(refs);
-      updateCommentFab(refs);
+      refreshSelectionUi(refs);
     });
+
+    if (previewCanvas) {
+      const refreshSelectionFromTouch = () => scheduleSelectionUiRefresh(refs);
+      previewCanvas.addEventListener("touchend", refreshSelectionFromTouch, { passive: true });
+      previewCanvas.addEventListener("contextmenu", refreshSelectionFromTouch);
+      previewCanvas.addEventListener("mouseup", refreshSelectionFromTouch);
+    }
 
     if (previewFab) {
       previewFab.addEventListener("click", () => {
@@ -1215,6 +1223,7 @@
 
     if (!refs.modalBackdrop) return;
     state.modalOpen = true;
+    updateCommentFab(refs);
     refs.modalBackdrop.classList.remove("hidden");
     refs.modalBackdrop.innerHTML = `
       <div class="modal agent-modal" role="dialog" aria-modal="true">
@@ -1318,6 +1327,19 @@
   function scheduleLayout(refs) {
     cancelAnimationFrame(state.layoutFrame);
     state.layoutFrame = requestAnimationFrame(() => syncThreadLayout(refs));
+  }
+
+  function refreshSelectionUi(refs) {
+    updateSelectionBubble(refs);
+    updateCommentFab(refs);
+  }
+
+  function scheduleSelectionUiRefresh(refs) {
+    clearTimeout(state.selectionRefreshTimer);
+    clearTimeout(state.selectionRefreshFollowupTimer);
+    state.selectionRefreshTimer = setTimeout(() => refreshSelectionUi(refs), 0);
+    // iOS Safari can finalize text selection slightly after touchend/contextmenu.
+    state.selectionRefreshFollowupTimer = setTimeout(() => refreshSelectionUi(refs), 140);
   }
 
   function syncThreadLayout(refs) {
@@ -1522,6 +1544,11 @@
   }
 
   function updateSelectionBubble(refs) {
+    if (!refs.selectionBubble || !refs.previewContent || !refs.previewCanvas) {
+      state.pendingAnchor = null;
+      return;
+    }
+
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
       refs.selectionBubble.classList.add("hidden");
@@ -1688,6 +1715,7 @@
 
   function openModal(refs, options) {
     state.modalOpen = true;
+    updateCommentFab(refs);
     refs.modalBackdrop.classList.remove("hidden");
     refs.modalBackdrop.innerHTML = `
       <div class="modal${options.compact ? " compact" : ""}" role="dialog" aria-modal="true">
@@ -1753,6 +1781,7 @@
     state.modalOpen = false;
     refs.modalBackdrop.classList.add("hidden");
     refs.modalBackdrop.innerHTML = "";
+    scheduleSelectionUiRefresh(refs);
   }
 
   async function handleThreadAction(action, threadId, messageId, refs, isPublic) {
@@ -1840,6 +1869,7 @@
     syncThreadLayout(refs);
 
     state.modalOpen = true;
+    updateCommentFab(refs);
     refs.modalBackdrop.classList.remove("hidden");
     refs.modalBackdrop.innerHTML = `
       <div class="modal thread-modal" role="dialog" aria-modal="true">
@@ -1939,31 +1969,38 @@
     if (!refs.commentFab) {
       return;
     }
+
+    refs.commentFab.classList.toggle("comment-fab--sticky", isMobileDevice);
+    refs.commentFab.textContent = isMobileDevice ? "Add comment" : "+ Comment";
+
     const bubbleVisible = refs.selectionBubble && refs.selectionBubble.offsetParent !== null;
-    if (!bubbleVisible && state.pendingAnchor && state.pendingAnchor.quote.trim()) {
-      refs.commentFab.style.display = "flex";
-      const isMobile = isMobileDevice;
-      if (isMobile) {
-        refs.commentFab.style.position = "fixed";
-        refs.commentFab.style.bottom = "1.25rem";
-        refs.commentFab.style.right = "1.25rem";
-        refs.commentFab.style.left = "";
-        refs.commentFab.style.top = "";
-      } else {
-        const selection = window.getSelection();
-        if (selection && selection.rangeCount > 0) {
-          const range = selection.getRangeAt(0);
-          const rect = range.getBoundingClientRect();
-          const canvasRect = refs.previewCanvas.getBoundingClientRect();
-          refs.commentFab.style.position = "absolute";
-          refs.commentFab.style.left = `${Math.max(16, rect.left - canvasRect.left)}px`;
-          refs.commentFab.style.top = `${rect.bottom - canvasRect.top + 6}px`;
-          refs.commentFab.style.bottom = "";
-          refs.commentFab.style.right = "";
-        }
-      }
-    } else {
+    const shouldShow = !state.modalOpen && !bubbleVisible && state.pendingAnchor && state.pendingAnchor.quote.trim();
+    if (!shouldShow) {
       refs.commentFab.style.display = "none";
+      return;
+    }
+
+    refs.commentFab.style.display = "flex";
+
+    if (isMobileDevice) {
+      refs.commentFab.style.position = "";
+      refs.commentFab.style.left = "";
+      refs.commentFab.style.top = "";
+      refs.commentFab.style.bottom = "";
+      refs.commentFab.style.right = "";
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      const canvasRect = refs.previewCanvas.getBoundingClientRect();
+      refs.commentFab.style.position = "absolute";
+      refs.commentFab.style.left = `${Math.max(16, rect.left - canvasRect.left)}px`;
+      refs.commentFab.style.top = `${rect.bottom - canvasRect.top + 6}px`;
+      refs.commentFab.style.bottom = "";
+      refs.commentFab.style.right = "";
     }
   }
 

@@ -404,7 +404,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
 
 /* --- Comment FAB: shown via JS when bubble can't show --- */
 .comment-fab {
-  display: none; z-index: 8;
+  display: none; z-index: 12;
   padding: 0.45rem 0.8rem; border-radius: 999px;
   font-size: 0.88rem; font-weight: 600;
   align-items: center; justify-content: center; gap: 0.35rem;
@@ -412,6 +412,17 @@ input:focus, textarea:focus { border-color: var(--muted); }
   box-shadow: 0 4px 16px rgba(224, 168, 110, 0.35);
 }
 .comment-fab:hover { background: var(--fab-hover); }
+.comment-fab--sticky {
+  position: fixed;
+  left: 1rem;
+  right: 1rem;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  min-height: 48px;
+  padding: 0.8rem 1rem;
+  border-radius: 14px;
+  font-size: 0.95rem;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
 
 /* --- Thread rail: hidden by default, activated by layout classes on wide screens --- */
 .thread-rail {
@@ -534,6 +545,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
   .preview-content, .preview-stage.public .preview-content { width: auto; max-width: none; padding: 2rem 1rem 1rem; }
   .thread-rail { display: none !important; }
   .selection-bubble { display: none !important; }
+  .comment-fab--sticky { left: 1rem; right: 1rem; }
   .topbar-desktop { display: none !important; }
 
   /* Public page doesn't need the fab/close, preview is always visible */
