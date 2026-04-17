@@ -12,7 +12,10 @@
   const isMobileDevice = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
     (navigator.userAgent.includes("Mac") && "ontouchstart" in window && navigator.maxTouchPoints > 1);
 
-  const themeIcon = window.__themeIcon || ((t) => t === "dark" ? "☀" : "☾");
+  const getThemePreference = () => window.__getThemePreference
+    ? window.__getThemePreference()
+    : (document.documentElement.getAttribute("data-theme-preference") || document.documentElement.getAttribute("data-theme") || "system");
+  const themeIcon = window.__themeIcon || ((preference) => preference === "light" ? "☀" : preference === "dark" ? "☾" : "◐");
 
   let mermaidIdCounter = 0;
   let mermaidCache = [];
@@ -137,7 +140,7 @@
             <jot-icon-button icon="plus" label="New note" id="newNoteButton"></jot-icon-button>
             <jot-icon-button icon="settings" label="Settings" id="settingsButton"></jot-icon-button>
             <jot-icon-button icon="logout" label="Logout" id="logoutButton"></jot-icon-button>
-            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
+            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Cycle theme">${themeIcon(getThemePreference())}</button>
           </div>
         </header>
         <main class="list-page">
@@ -786,7 +789,7 @@
               <jot-icon-button icon="share" label="Share" id="shareButton"></jot-icon-button>
               <div class="share-popover hidden" id="sharePopover"></div>
             </div>
-            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
+            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Cycle theme">${themeIcon(getThemePreference())}</button>
           </div>
         </header>
         <main class="workspace">
@@ -837,7 +840,7 @@
           </div>
           <div class="topbar-right">
             <jot-icon-button icon="robot" label="Agent setup" id="agentButton"></jot-icon-button>
-            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
+            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Cycle theme">${themeIcon(getThemePreference())}</button>
           </div>
         </header>
         <main class="preview-stage public" id="previewStage">
@@ -870,7 +873,7 @@
           <div class="topbar-right">
             <jot-icon-button icon="preview" label="Preview" id="previewFab"></jot-icon-button>
             <jot-icon-button icon="robot" label="Agent setup" id="agentButton"></jot-icon-button>
-            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
+            <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Cycle theme">${themeIcon(getThemePreference())}</button>
           </div>
         </header>
         <main class="workspace">
